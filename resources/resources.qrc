@@ -1,0 +1,56 @@
+<RCC>
+  <qresource prefix="/">
+    <file>symbols/Digital/and.asy</file>
+    <file>symbols/Digital/buf.asy</file>
+    <file>symbols/Digital/buf1.asy</file>
+    <file>symbols/Digital/inv.asy</file>
+    <file>symbols/Digital/or.asy</file>
+    <file>symbols/Digital/xor.asy</file>
+    <file>symbols/LED.asy</file>
+    <file>symbols/OpAmps/opamp.asy</file>
+    <file>symbols/TVSdiode.asy</file>
+    <file>symbols/bi.asy</file>
+    <file>symbols/bi2.asy</file>
+    <file>symbols/bv.asy</file>
+    <file>symbols/cap.asy</file>
+    <file>symbols/csw.asy</file>
+    <file>symbols/current.asy</file>
+    <file>symbols/diode.asy</file>
+    <file>symbols/e.asy</file>
+    <file>symbols/e2.asy</file>
+    <file>symbols/f.asy</file>
+    <file>symbols/g.asy</file>
+    <file>symbols/g2.asy</file>
+    <file>symbols/h.asy</file>
+    <file>symbols/ind.asy</file>
+    <file>symbols/ind2.asy</file>
+    <file>symbols/load.asy</file>
+    <file>symbols/load2.asy</file>
+    <file>symbols/lpnp.asy</file>
+    <file>symbols/ltline.asy</file>
+    <file>symbols/mesfet.asy</file>
+    <file>symbols/njf.asy</file>
+    <file>symbols/nmos.asy</file>
+    <file>symbols/nmos4.asy</file>
+    <file>symbols/npn.asy</file>
+    <file>symbols/npn2.asy</file>
+    <file>symbols/npn3.asy</file>
+    <file>symbols/npn4.asy</file>
+    <file>symbols/pjf.asy</file>
+    <file>symbols/pmos.asy</file>
+    <file>symbols/pmos4.asy</file>
+    <file>symbols/pnp.asy</file>
+    <file>symbols/pnp2.asy</file>
+    <file>symbols/pnp4.asy</file>
+    <file>symbols/polcap.asy</file>
+    <file>symbols/res.asy</file>
+    <file>symbols/res2.asy</file>
+    <file>symbols/schottky.asy</file>
+    <file>symbols/sw.asy</file>
+    <file>symbols/tline.asy</file>
+    <file>symbols/varactor.asy</file>
+    <file>symbols/voltage.asy</file>
+    <file>symbols/zener.asy</file>
+    <file alias="sub/opamp.sub">sub_opamp.sub</file>
+  </qresource>
+</RCC>

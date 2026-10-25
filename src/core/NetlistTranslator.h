@@ -1,0 +1,101 @@
+#pragma once
+
+#include <QHash>
+#include <QSet>
+#include <QString>
+#include <QStringList>
+
+// Translates an LTspice-dialect netlist into a netlist ngspice can simulate
+// (with ngspice's LTspice compatibility mode enabled). Library references are
+// resolved and only the definitions that are actually used are pulled in.
+struct TranslationResult {
+    QString netlist;
+    QStringList errors;
+    QStringList warnings;
+    QString analysis;       // "tran", "ac", "dc", "op", "noise", "tf" or ""
+    QString analysisLine;   // the original LTspice analysis directive
+    QString dcSweepSource;  // name of the first swept source/parameter in .dc
+    QHash<QString, QString> elementNames; // lower-case ngspice name -> LTspice name
+    QHash<QString, QString> nodeNames;    // lower-case node -> original spelling
+    QStringList measStatements;
+    QStringList waveStatements;
+    QStringList fourStatements;
+    QStringList funcLines;  // .func definitions (also usable in the waveform viewer)
+    QHash<QString, QString> params; // .param name -> expression text
+    QString measComplexFormat;      // from .options meascplxfmt
+    bool hasAnalysis = false;
+};
+
+class NetlistTranslator
+{
+public:
+    struct Options {
+        QString baseDir;          // directory of the schematic/netlist (for relative paths)
+        bool inductorRser = true; // LTspice's default 1mΩ series resistance on inductors
+        bool saveCurrents = true;
+        QString extraOptions;     // appended as a .options line
+    };
+
+    TranslationResult translate(const QStringList &ltLines, const Options &opts);
+
+    // Splits an LTspice element/directive line into tokens, keeping
+    // parenthesised/braced groups together ("PULSE(0 1 0)" is one token).
+    static QStringList tokenize(const QString &line);
+    // Rewrites LTspice expression functions that ngspice lacks (if, limit, table, buf, inv).
+    static QString rewriteExpression(const QString &expr);
+
+private:
+    struct Subckt {
+        QString name;
+        QString header;
+        QStringList body;
+    };
+
+    void processLines(const QStringList &lines, int depth);
+    void addLibrary(const QString &file, const QString &section);
+    QStringList translateElement(const QString &line, bool topLevel);
+    QStringList translateElementTokens(QStringList t, const QString &line, QChar k);
+    QStringList translatePassive(const QStringList &t);
+    QStringList translateSource(const QStringList &t);
+    QStringList translateBehavioral(const QString &line);
+    QStringList translateControlled(const QStringList &t, const QString &line);
+    QStringList translateSemiconductor(const QStringList &t);
+    QStringList translateDigital(const QStringList &t);
+    QStringList translateMutual(const QStringList &t);
+    QString translateModel(const QString &line);
+    QString translateAnalysis(const QString &line);
+    void handleOptions(const QString &line);
+    void collectNeeds(const QStringList &elementLines, QSet<QString> &models, QSet<QString> &subckts) const;
+    void resolveDefinitions();
+    QString pwlFromFile(const QString &file, double timeScale, double valueScale);
+    QString nodeToken(const QString &n);
+    QString elementName(const QString &n);
+    bool isKnownModel(const QString &name) const;
+    QString internalNode(const QString &elem, int k);
+    void collectCurrentSenses(const QStringList &lines);
+    void disambiguateModels(QStringList &out);
+    QString rewriteCurrents(const QString &expr) const;
+
+    Options m_opts;
+    TranslationResult m_res;
+    QStringList m_topElements;
+    QList<Subckt> m_subckts;
+    QStringList m_models;      // .model lines from the netlist
+    QStringList m_params;      // .param / .func lines
+    QStringList m_directives;  // other directives passed through (.ic, .nodeset, .temp, .global, .four)
+    QStringList m_analysis;    // translated analysis lines
+    QStringList m_optionLines;
+    QStringList m_libFiles;    // resolved library paths in order
+    QHash<QString, QString> m_libSections; // path -> section (for HSPICE style .lib file section)
+    QSet<QString> m_definedModels;  // lower-case names defined in the netlist
+    QSet<QString> m_definedSubckts;
+    QHash<QString, QString> m_modelTypes; // lower-case model -> type (all known models)
+    QStringList m_pulledDefs;  // definitions pulled from libraries
+    QHash<QString, QString> m_inductorIc; // from .ic I(L1)=x
+    QHash<QString, QStringList> m_stepModelOverrides; // lower model -> "param=value"
+    QHash<QString, QSet<int>> m_senses; // lower device name -> 1-based terminals needing a 0V sense source
+    double m_tranMaxStep = 0;
+    bool m_thevInduc = false;
+    int m_includeDepth = 0;
+    bool m_inMachine = false;
+};

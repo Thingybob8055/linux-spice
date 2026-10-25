@@ -1,0 +1,6 @@
+* LinSpice single-pole op amp model
+.subckt opamp inn inp out params: Aol=100K GBW=10Meg
+G1 0 out inp inn {Aol}
+R1 out 0 1
+C1 out 0 {Aol/GBW/(2*pi)}
+.ends opamp
