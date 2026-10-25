@@ -62,6 +62,7 @@ private:
     QStringList translateSemiconductor(const QStringList &t);
     QStringList translateDigital(const QStringList &t);
     QStringList translateMutual(const QStringList &t);
+    QStringList translateSwitch(const QStringList &t);
     QString translateModel(const QString &line);
     QString translateAnalysis(const QString &line);
     void handleOptions(const QString &line);
@@ -93,9 +94,11 @@ private:
     QStringList m_pulledDefs;  // definitions pulled from libraries
     QHash<QString, QString> m_inductorIc; // from .ic I(L1)=x
     QHash<QString, QStringList> m_stepModelOverrides; // lower model -> "param=value"
+    QHash<QString, QString> m_modelLines; // lower model name -> .model line (for parameter lookups)
     QHash<QString, QSet<int>> m_senses; // lower device name -> 1-based terminals needing a 0V sense source
     double m_tranMaxStep = 0;
     bool m_thevInduc = false;
     int m_includeDepth = 0;
     bool m_inMachine = false;
+    bool m_startup = false;
 };

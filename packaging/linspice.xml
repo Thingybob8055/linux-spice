@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+  <mime-type type="application/x-ltspice-schematic">
+    <comment>LTspice schematic</comment>
+    <glob pattern="*.asc"/>
+    <magic priority="60"><match type="string" offset="0" value="Version 4"/></magic>
+  </mime-type>
+  <mime-type type="application/x-ltspice-symbol">
+    <comment>LTspice symbol</comment>
+    <glob pattern="*.asy"/>
+  </mime-type>
+  <mime-type type="application/x-spice-raw">
+    <comment>SPICE waveform data</comment>
+    <glob pattern="*.raw"/>
+  </mime-type>
+  <mime-type type="application/x-spice-netlist">
+    <comment>SPICE netlist</comment>
+    <glob pattern="*.net"/>
+    <glob pattern="*.cir"/>
+    <glob pattern="*.sp"/>
+  </mime-type>
+</mime-info>

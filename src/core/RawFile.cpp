@@ -175,6 +175,7 @@ QList<DatasetPtr> read(const QString &path, QString *error)
         ds->sourceFile = path;
         int nVars = 0, nPoints = 0;
         QString flags;
+        QStringList stepLabels;
         bool gotData = false, binary = false;
         QString line;
         bool inVars = false;
@@ -201,6 +202,7 @@ QList<DatasetPtr> read(const QString &path, QString *error)
             else if (key == QLatin1String("no. variables")) nVars = val.toInt();
             else if (key == QLatin1String("no. points")) nPoints = val.toInt();
             else if (key == QLatin1String("command")) ds->command = val;
+            else if (key == QLatin1String("steps")) stepLabels = val.split(QStringLiteral("; "));
             else if (key == QLatin1String("variables")) inVars = true;
             else if (key == QLatin1String("binary")) { binary = true; gotData = true; break; }
             else if (key == QLatin1String("values")) { binary = false; gotData = true; break; }
@@ -316,8 +318,11 @@ QList<DatasetPtr> read(const QString &path, QString *error)
         // For AC data the frequency is stored as complex with zero imaginary part.
         ds->runs.append(run);
         ds->rebuildIndex();
-        if (flags.contains(QLatin1String("stepped")))
+        if (flags.contains(QLatin1String("stepped"))) {
             ds->splitSteps();
+            for (int r = 0; r < ds->runs.size() && r < stepLabels.size(); ++r)
+                ds->runs[r].label = stepLabels[r];
+        }
         result.append(ds);
     }
     if (result.isEmpty() && error)
@@ -333,49 +338,63 @@ bool write(const QString &path, const Dataset &ds, bool binary, QString *error)
             *error = f.errorString();
         return false;
     }
+    // All runs go into one plot; several runs are flagged "stepped" (as LTspice does).
+    int total = 0;
+    for (int r = 0; r < ds.runs.size(); ++r)
+        total += ds.pointCount(r);
+    QByteArray hdr;
+    hdr += "Title: " + ds.title.toUtf8() + "\n";
+    hdr += "Date: " + ds.date.toUtf8() + "\n";
+    hdr += "Plotname: " + ds.plotName.toUtf8() + "\n";
+    QByteArray flags = ds.complex ? "complex" : "real";
+    if (ds.logScaleX || ds.kind == Dataset::Kind::AC)
+        flags += " forward log";
+    if (ds.runs.size() > 1)
+        flags += " stepped";
+    hdr += "Flags: " + flags + "\n";
+    hdr += "No. Variables: " + QByteArray::number(ds.vars.size()) + "\n";
+    hdr += "No. Points: " + QByteArray::number(total) + "\n";
+    if (ds.runs.size() > 1) {
+        QStringList labels;
+        for (const auto &run : ds.runs)
+            labels << run.label;
+        hdr += "Steps: " + labels.join(QStringLiteral("; ")).toUtf8() + "\n";
+    }
+    hdr += "Variables:\n";
+    for (int v = 0; v < ds.vars.size(); ++v)
+        hdr += "\t" + QByteArray::number(v) + "\t" + ds.vars[v].name.toUtf8() + "\t" + ds.vars[v].type.toUtf8() + "\n";
+    hdr += binary ? "Binary:\n" : "Values:\n";
+    f.write(hdr);
+    int index = 0;
     for (int r = 0; r < ds.runs.size(); ++r) {
         const Dataset::Run &run = ds.runs[r];
         const int n = ds.pointCount(r);
-        QByteArray hdr;
-        hdr += "Title: " + ds.title.toUtf8() + "\n";
-        hdr += "Date: " + ds.date.toUtf8() + "\n";
-        hdr += "Plotname: " + ds.plotName.toUtf8() + "\n";
-        hdr += QByteArray("Flags: ") + (ds.complex ? "complex" : "real") + "\n";
-        hdr += "No. Variables: " + QByteArray::number(ds.vars.size()) + "\n";
-        hdr += "No. Points: " + QByteArray::number(n) + "\n";
-        hdr += "Variables:\n";
-        for (int v = 0; v < ds.vars.size(); ++v)
-            hdr += "\t" + QByteArray::number(v) + "\t" + ds.vars[v].name.toUtf8() + "\t" + ds.vars[v].type.toUtf8() + "\n";
-        hdr += binary ? "Binary:\n" : "Values:\n";
-        f.write(hdr);
+        QByteArray buf;
         if (binary) {
-            QByteArray buf;
             buf.reserve(qsizetype(n) * ds.vars.size() * (ds.complex ? 16 : 8));
             for (int p = 0; p < n; ++p) {
                 for (int v = 0; v < ds.vars.size(); ++v) {
                     double re = run.re[v][p];
                     buf.append(reinterpret_cast<const char *>(&re), 8);
                     if (ds.complex) {
-                        double im = run.im[v][p];
+                        double im = run.im.isEmpty() ? 0.0 : run.im[v][p];
                         buf.append(reinterpret_cast<const char *>(&im), 8);
                     }
                 }
             }
-            f.write(buf);
         } else {
-            QByteArray buf;
-            for (int p = 0; p < n; ++p) {
+            for (int p = 0; p < n; ++p, ++index) {
                 for (int v = 0; v < ds.vars.size(); ++v) {
-                    buf += v == 0 ? QByteArray::number(p) + "\t" : QByteArray("\t");
+                    buf += v == 0 ? QByteArray::number(index) + "\t" : QByteArray("\t");
                     if (ds.complex)
-                        buf += QByteArray::number(run.re[v][p], 'g', 17) + "," + QByteArray::number(run.im[v][p], 'g', 17);
+                        buf += QByteArray::number(run.re[v][p], 'g', 17) + "," + QByteArray::number(run.im.isEmpty() ? 0.0 : run.im[v][p], 'g', 17);
                     else
                         buf += QByteArray::number(run.re[v][p], 'g', 17);
                     buf += "\n";
                 }
             }
-            f.write(buf);
         }
+        f.write(buf);
     }
     if (!f.commit()) {
         if (error)

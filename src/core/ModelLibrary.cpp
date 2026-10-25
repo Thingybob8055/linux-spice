@@ -275,6 +275,18 @@ QString ModelLibrary::findSubcktFile(const QString &name)
     return QString();
 }
 
+QList<ModelDef> ModelLibrary::standardModelsOfType(const QStringList &types)
+{
+    standardModel(QStringLiteral("__load__"));
+    QMutexLocker lock(&m_mutex);
+    QList<ModelDef> out;
+    for (const ModelDef &d : std::as_const(m_standard))
+        if (types.contains(d.type))
+            out << d;
+    std::sort(out.begin(), out.end(), [](const ModelDef &a, const ModelDef &b) { return a.name.compare(b.name, Qt::CaseInsensitive) < 0; });
+    return out;
+}
+
 std::optional<ModelDef> ModelLibrary::standardModel(const QString &name)
 {
     QMutexLocker lock(&m_mutex);

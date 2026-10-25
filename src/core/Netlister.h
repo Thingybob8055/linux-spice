@@ -57,6 +57,7 @@ private:
     QSet<QString> m_doneSubckts;
     QStringList m_subcktText;
     QStringList m_libLines;
+    QStringList m_topDirectives;
     QSet<QString> m_globals;
 };
 

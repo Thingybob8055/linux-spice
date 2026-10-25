@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=LinSpice
+GenericName=Circuit Simulator
+Comment=Schematic capture and SPICE simulation (LTspice-compatible files)
+Exec=linspice %F
+Icon=linspice
+Terminal=false
+Categories=Electronics;Engineering;Science;Education;
+MimeType=application/x-ltspice-schematic;application/x-ltspice-symbol;application/x-spice-raw;application/x-spice-netlist;
+Keywords=spice;ltspice;circuit;simulation;schematic;electronics;

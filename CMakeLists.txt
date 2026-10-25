@@ -40,8 +40,10 @@ set(SIM_SOURCES
     src/sim/SimWorker.cpp
     src/sim/SimController.cpp
 )
+# The batch mode and worker live in the same binary as the GUI.
 
 set(GUI_SOURCES
+    src/gui/Document.h
     src/gui/MainWindow.cpp
     src/gui/Icons.cpp
     src/gui/SchematicView.cpp
@@ -50,7 +52,6 @@ set(GUI_SOURCES
     src/gui/WaveformView.cpp
     src/gui/WaveformPane.cpp
     src/gui/NetlistEditor.cpp
-    src/gui/LogWindow.cpp
     src/gui/dialogs/ComponentBrowser.cpp
     src/gui/dialogs/AnalysisDialog.cpp
     src/gui/dialogs/SourceDialog.cpp
@@ -66,6 +67,7 @@ set(GUI_SOURCES
 )
 
 add_executable(linspice src/main.cpp ${SIM_SOURCES} ${GUI_SOURCES})
+target_compile_definitions(linspice PRIVATE LINSPICE_VERSION="${PROJECT_VERSION}")
 target_link_libraries(linspice PRIVATE linspice_core Qt6::Widgets Qt6::Svg Qt6::PrintSupport Qt6::Concurrent ${CMAKE_DL_LIBS})
 target_include_directories(linspice PRIVATE src)
 

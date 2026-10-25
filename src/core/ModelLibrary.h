@@ -45,6 +45,8 @@ public:
     // Looks up a model in LTspice's standard component databases
     // (cmp/standard.bjt, .dio, .mos, .jft) for implicit model references.
     std::optional<ModelDef> standardModel(const QString &name);
+    // All standard models whose type is one of `types` (upper case), sorted by name.
+    QList<ModelDef> standardModelsOfType(const QStringList &types);
 
     // Finds a subcircuit file "<name>.sub"/"<name>.lib" in the library tree.
     QString findSubcktFile(const QString &name);

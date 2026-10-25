@@ -22,6 +22,8 @@ QString AppSettings::defaultLibraryRoot() const
 
 QString AppSettings::libraryRoot() const
 {
+    if (qEnvironmentVariableIsSet("LINSPICE_LIBRARY_ROOT"))
+        return qEnvironmentVariable("LINSPICE_LIBRARY_ROOT");
     return m_settings.value(QStringLiteral("paths/libraryRoot"), defaultLibraryRoot()).toString();
 }
 
@@ -29,6 +31,8 @@ void AppSettings::setLibraryRoot(const QString &dir) { m_settings.setValue(QStri
 
 QString AppSettings::examplesRoot() const
 {
+    if (qEnvironmentVariableIsSet("LINSPICE_EXAMPLES_ROOT"))
+        return qEnvironmentVariable("LINSPICE_EXAMPLES_ROOT");
     return m_settings
         .value(QStringLiteral("paths/examplesRoot"),
                QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation) + QStringLiteral("/examples"))

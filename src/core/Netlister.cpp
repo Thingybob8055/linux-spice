@@ -372,13 +372,15 @@ QStringList Netlister::sheetBody(const Schematic &sch, const Connectivity &conn,
         Q_UNUSED(lines);
     };
     if (topLevel) {
+        // Directive blocks keep their exact line order (they may contain
+        // complete .subckt definitions with element lines).
         for (const SchText &t : sch.texts) {
             if (!t.directive)
                 continue;
             QStringList block;
             for (const QString &l : t.text.split('\n'))
                 appendDirective(l, block);
-            lines << block;
+            m_topDirectives << block;
         }
     } else {
         for (const SchText &t : sch.texts) {
@@ -431,6 +433,7 @@ void Netlister::emitSubckts()
 NetlistResult Netlister::build()
 {
     m_result = NetlistResult();
+    m_topDirectives.clear();
     m_result.conn = connectivity(m_sch, &m_result.warnings);
 
     QStringList out;
@@ -439,16 +442,9 @@ NetlistResult Netlister::build()
     emitSubckts();
 
     // Element lines first, then subcircuits, then directives in schematic order.
-    QStringList elements, directives;
-    for (const QString &l : body) {
-        if (l.trimmed().startsWith('.') || l.trimmed().startsWith('+') || l.trimmed().startsWith('*'))
-            directives << l;
-        else
-            elements << l;
-    }
-    out << elements;
+    out << body;
     out << m_subcktText;
-    out << directives;
+    out << m_topDirectives;
     for (const QString &lib : m_libLines)
         out << QStringLiteral(".lib %1").arg(lib);
     if (!m_globals.isEmpty())

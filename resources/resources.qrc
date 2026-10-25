@@ -51,6 +51,7 @@
     <file>symbols/varactor.asy</file>
     <file>symbols/voltage.asy</file>
     <file>symbols/zener.asy</file>
+    <file>icons/linspice.svg</file>
     <file alias="sub/opamp.sub">sub_opamp.sub</file>
   </qresource>
 </RCC>

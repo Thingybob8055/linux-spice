@@ -61,6 +61,17 @@ using SendData = int(vecvaluesall *, int, int, void *);
 using SendInitData = int(vecinfoall *, int, void *);
 using BGThreadRunning = int(bool, int, void *);
 
+struct vector_info {
+    char *v_name;
+    int v_type;
+    short v_flags;
+    double *v_realdata;
+    ngcomplex *v_compdata;
+    int v_length;
+};
+using FnVecInfo = vector_info *(*)(char *);
+using FnAllVecs = char **(*)(char *);
+
 using FnInit = int (*)(SendChar *, SendStat *, ControlledExit *, SendData *, SendInitData *, BGThreadRunning *, void *);
 using FnCommand = int (*)(const char *);
 using FnCirc = int (*)(char **);
@@ -215,9 +226,13 @@ int runSimWorker(int argc, char **argv)
     const std::string netlistPath = argv[2];
     const std::string rawPath = argv[3];
     std::string livePath;
-    for (int i = 4; i + 1 < argc; ++i)
+    std::string seed;
+    for (int i = 4; i + 1 < argc; ++i) {
         if (std::strcmp(argv[i], "--live") == 0)
             livePath = argv[i + 1];
+        else if (std::strcmp(argv[i], "--seed") == 0)
+            seed = argv[i + 1];
+    }
 
     std::string err;
     void *lib = openNgspice(&err);
@@ -266,6 +281,8 @@ int runSimWorker(int argc, char **argv)
     command("set filetype=binary");
     command("set noaskquit");
     command("set nomoremode");
+    if (!seed.empty())
+        command(("set rndseed=" + seed).c_str());
 
     // Read the netlist and hand it to ngspice line by line.
     std::ifstream in(netlistPath, std::ios::binary);
@@ -332,30 +349,110 @@ int runSimWorker(int argc, char **argv)
         }
     }
 
-    // Write every plot produced by this run into the raw file (in order).
+    // Write every plot produced by this run into the raw file (oldest first).
+    // The vectors are read through the shared-library API so that empty or
+    // unavailable vectors (e.g. some device currents in AC analysis) are skipped
+    // instead of aborting the whole write.
+    auto vecInfo = reinterpret_cast<FnVecInfo>(dlsym(lib, "ngGet_Vec_Info"));
+    auto allVecs = reinterpret_cast<FnAllVecs>(dlsym(lib, "ngSpice_AllVecs"));
     std::vector<std::string> plots;
     if (char **all = allPlots()) {
         for (int i = 0; all[i]; ++i) {
             const std::string p = all[i];
-            if (p == "const")
-                continue;
-            plots.push_back(p);
+            if (p != "const")
+                plots.push_back(p);
         }
     }
-    // ngspice lists newest first; write oldest first.
-    std::string writeCmd = "write " + rawPath;
     int written = 0;
-    std::vector<std::string> ordered(plots.rbegin(), plots.rend());
-    for (const auto &p : ordered) {
-        writeCmd += " " + p + ".all";
-        ++written;
-        emit("PLOT", p);
+    FILE *raw = std::fopen(rawPath.c_str(), "wb");
+    if (raw && vecInfo && allVecs) {
+        for (auto it = plots.rbegin(); it != plots.rend(); ++it) {
+            const std::string &plot = *it;
+            command(("setplot " + plot).c_str());
+            std::vector<std::string> names;
+            if (char **vs = allVecs(const_cast<char *>(plot.c_str())))
+                for (int i = 0; vs[i]; ++i)
+                    names.push_back(vs[i]);
+            // ngGet_Vec_Info returns a pointer to a static struct that is
+            // overwritten by the next call, so copy what we need right away.
+            struct Vec {
+                std::string name;
+                vector_info info;
+            };
+            std::vector<Vec> vecs;
+            int scaleIdx = -1;
+            for (const auto &n : names) {
+                vector_info *vi = vecInfo(const_cast<char *>(n.c_str()));
+                if (!vi || vi->v_length <= 0 || (!vi->v_realdata && !vi->v_compdata))
+                    continue;
+                if (scaleIdx < 0 && (n == "time" || n == "frequency" || (n.size() > 6 && n.compare(n.size() - 6, 6, "-sweep") == 0)))
+                    scaleIdx = int(vecs.size());
+                vecs.push_back({n, *vi});
+            }
+            if (vecs.empty())
+                continue;
+            if (scaleIdx > 0)
+                std::swap(vecs[0], vecs[scaleIdx]);
+            // Keep only vectors as long as the scale.
+            const int npts = vecs[0].info.v_length;
+            std::vector<Vec> keep;
+            for (const auto &v : vecs)
+                if (v.info.v_length == npts)
+                    keep.push_back(v);
+            bool complex = false;
+            for (const auto &v : keep)
+                if (v.info.v_compdata && !v.info.v_realdata)
+                    complex = true;
+            std::string plotName = "Unknown";
+            const std::string prefix = plot.substr(0, plot.find_first_of("0123456789"));
+            if (prefix == "tran") plotName = "Transient Analysis";
+            else if (prefix == "ac") plotName = "AC Analysis";
+            else if (prefix == "dc") plotName = "DC transfer characteristic";
+            else if (prefix == "op") plotName = "Operating Point";
+            else if (prefix == "noise") plotName = npts > 1 ? "Noise Spectral Density Curves" : "Integrated Noise";
+            else if (prefix == "tf") plotName = "Transfer Function";
+            else if (prefix == "sp") plotName = "S-Parameter Analysis";
+            else if (prefix == "pz") plotName = "Pole-Zero Analysis";
+            static const char *typeNames[] = {"notype", "time", "frequency", "voltage", "current", "voltage-density",
+                                              "current-density", "sqr-voltage-density", "sqr-current-density", "sqr-voltage",
+                                              "sqr-current", "pole", "zero", "s-param", "temp-sweep", "res-sweep",
+                                              "impedance", "admittance", "power", "phase", "decibel", "capacitance", "charge"};
+            std::fprintf(raw, "Title: %s\nDate: \nPlotname: %s\nFlags: %s\nNo. Variables: %d\nNo. Points: %d\nVariables:\n",
+                         plot.c_str(), plotName.c_str(), complex ? "complex" : "real", int(keep.size()), npts);
+            for (size_t i = 0; i < keep.size(); ++i) {
+                const int t = keep[i].info.v_type;
+                const char *tn = (t >= 0 && t < int(sizeof typeNames / sizeof *typeNames)) ? typeNames[t] : "notype";
+                // Name vectors the way ngspice's raw writer does: v(node), i(branch).
+                std::string name = keep[i].name;
+                const bool isScale = i == 0 && scaleIdx >= 0;
+                if (!isScale) {
+                    const auto hash = name.find("#branch");
+                    if (hash != std::string::npos && name.find('(') == std::string::npos)
+                        name = "i(" + name.substr(0, hash) + ")";
+                    else if (name.find_first_of("(@#") == std::string::npos && prefix != "noise" && prefix != "tf")
+                        name = "v(" + name + ")";
+                }
+                std::fprintf(raw, "\t%d\t%s\t%s\n", int(i), name.c_str(), tn);
+            }
+            std::fprintf(raw, "Binary:\n");
+            std::vector<double> row;
+            for (int p = 0; p < npts; ++p) {
+                row.clear();
+                for (const auto &v : keep) {
+                    double re = v.info.v_realdata ? v.info.v_realdata[p] : v.info.v_compdata[p].cx_real;
+                    double im = v.info.v_realdata ? 0.0 : v.info.v_compdata[p].cx_imag;
+                    row.push_back(re);
+                    if (complex)
+                        row.push_back(im);
+                }
+                std::fwrite(row.data(), sizeof(double), row.size(), raw);
+            }
+            ++written;
+            emit("PLOT", plot);
+        }
     }
-    if (written > 0) {
-        command("set appendwrite=0");
-        // ngspice's write with several plots puts each plot into the same file.
-        command(writeCmd.c_str());
-    }
+    if (raw)
+        std::fclose(raw);
     const int rc = g_exited ? int(g_exitStatus) : (written ? 0 : 6);
     char buf[16];
     std::snprintf(buf, sizeof buf, "%d", rc);
