@@ -492,7 +492,10 @@ void WaveformPane::drawAxes(QPainter &p, const QRectF &pr)
     for (double v : xt.major) {
         const double px = xToPixel(v);
         const QString lab = axisLabel(v, xu, xa.max - xa.min);
-        p.drawText(QRectF(px - 60, pr.bottom() + 2, 120, fm.height()), Qt::AlignHCenter | Qt::AlignTop, lab);
+        const double w = fm.horizontalAdvance(lab) + 4;
+        // Keep labels inside the pane horizontally.
+        const double left = std::clamp(px - w / 2, pr.left() - 4, double(width()) - w);
+        p.drawText(QRectF(left, pr.bottom() + 2, w, fm.height()), Qt::AlignHCenter | Qt::AlignTop, lab);
     }
 
     // Left Y axis

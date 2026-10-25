@@ -34,6 +34,7 @@ public:
     bool isSimulating() const;
     void plotOnActiveWaveform(const QString &expr);
     void activateDocument(int index);
+    QWidget *createDialogForTest(const QString &name);
 
 protected:
     void closeEvent(QCloseEvent *e) override;

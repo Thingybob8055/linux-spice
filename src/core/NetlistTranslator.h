@@ -63,6 +63,8 @@ private:
     QStringList translateDigital(const QStringList &t);
     QStringList translateMutual(const QStringList &t);
     QStringList translateSwitch(const QStringList &t);
+    QStringList translateIdealDiode(const QStringList &t, const QString &modelLine);
+    QStringList laplaceSource(const QString &name, QChar kind, const QString &n1, const QString &n2, const QString &input, const QString &line);
     QString translateModel(const QString &line);
     QString translateAnalysis(const QString &line);
     void handleOptions(const QString &line);

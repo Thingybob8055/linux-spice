@@ -155,7 +155,7 @@ void ComponentBrowser::applyFilter()
     m_list->clear();
     const QString q = m_search->text().trimmed();
     const auto entries = SymbolLibrary::instance().entries();
-    int count = 0;
+    QList<QPair<QString, const SymbolLibrary::Entry *>> rows;
     for (const auto &e : entries) {
         const QString base = e.name.section('\\', -1);
         if (q.isEmpty()) {
@@ -164,13 +164,16 @@ void ComponentBrowser::applyFilter()
         } else if (!base.contains(q, Qt::CaseInsensitive)) {
             continue;
         }
-        auto *item = new QListWidgetItem(q.isEmpty() ? base : e.name, m_list);
-        item->setData(Qt::UserRole, e.name);
-        item->setToolTip(e.path);
-        if (++count > 5000)
+        rows.append({q.isEmpty() ? base : e.name, &e});
+        if (rows.size() > 5000)
             break;
     }
-    m_list->sortItems();
+    std::sort(rows.begin(), rows.end(), [](const auto &a, const auto &b) { return a.first.compare(b.first, Qt::CaseInsensitive) < 0; });
+    for (const auto &r : rows) {
+        auto *item = new QListWidgetItem(r.first, m_list);
+        item->setData(Qt::UserRole, r.second->name);
+        item->setToolTip(r.second->path);
+    }
     if (m_list->count())
         m_list->setCurrentRow(0);
 }

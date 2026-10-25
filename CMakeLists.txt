@@ -27,6 +27,7 @@ set(CORE_SOURCES
     src/core/ModelLibrary.cpp
     src/core/Measure.cpp
     src/core/AppSettings.cpp
+    src/core/Laplace.cpp
 )
 
 add_library(linspice_core STATIC ${CORE_SOURCES} resources/resources.qrc)

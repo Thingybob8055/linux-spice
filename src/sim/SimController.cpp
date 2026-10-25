@@ -209,6 +209,35 @@ void SimController::onFinished(Job &job, int code)
         onOutput(job);
         job.proc->deleteLater();
     }
+    // Convergence trouble: retry once with stronger convergence aids
+    // (shunt resistance on every node, more gmin/source steps, more iterations).
+    const bool failed = (job.exitCode < 0 ? code : job.exitCode) != 0 || !QFileInfo::exists(job.rawPath);
+    const bool convergence = job.log.contains(QLatin1String("gmin stepping failed")) || job.log.contains(QLatin1String("singular matrix"))
+        || job.log.contains(QLatin1String("timestep too small")) || job.log.contains(QLatin1String("source stepping failed"));
+    if (failed && convergence && !job.retried && !m_aborted) {
+        job.retried = true;
+        QFile f(job.netlistPath);
+        if (f.open(QIODevice::ReadOnly)) {
+            QString text = QString::fromUtf8(f.readAll());
+            f.close();
+            const int endIdx = text.lastIndexOf(QLatin1String("\n.end"));
+            const QString extra = QStringLiteral("\n.options rshunt=1e12 gminsteps=200 srcsteps=200 itl1=1000 itl2=500 itl4=100 method=gear");
+            if (endIdx >= 0)
+                text.insert(endIdx, extra);
+            else
+                text += extra + QStringLiteral("\n.end\n");
+            if (f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+                f.write(text.toUtf8());
+                f.close();
+                job.log += QStringLiteral("\n*** Convergence failed; retrying with rshunt=1e12 and extended gmin/source stepping ***\n");
+                job.proc = nullptr;
+                job.exitCode = -1;
+                job.percent = 0;
+                launchNext();
+                return;
+            }
+        }
+    }
     job.done = true;
     if (job.exitCode < 0)
         job.exitCode = code;

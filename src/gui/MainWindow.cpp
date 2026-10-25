@@ -15,6 +15,9 @@
 #include "dialogs/ComponentBrowser.h"
 #include "dialogs/MiscDialogs.h"
 #include "dialogs/NetLabelDialog.h"
+#include "dialogs/PassiveDialog.h"
+#include "dialogs/SourceDialog.h"
+#include "dialogs/AttributeDialog.h"
 #include "dialogs/SettingsDialog.h"
 #include "dialogs/TextDialog.h"
 
@@ -1497,6 +1500,39 @@ void MainWindow::activateDocument(int index)
     const auto list = m_mdi->subWindowList();
     if (index >= 0 && index < list.size())
         m_mdi->setActiveSubWindow(list[index]);
+}
+
+QWidget *MainWindow::createDialogForTest(const QString &name)
+{
+    SchematicView *s = activeSchematic();
+    auto firstWithPrefix = [s](QChar p) -> int {
+        if (!s)
+            return -1;
+        for (int i = 0; i < s->schematic().symbols.size(); ++i)
+            if (s->schematic().symbols[i].attr(QStringLiteral("Prefix")).startsWith(p, Qt::CaseInsensitive))
+                return i;
+        return -1;
+    };
+    QDialog *d = nullptr;
+    if (name == QLatin1String("component"))
+        d = new ComponentBrowser(this);
+    else if (name == QLatin1String("analysis"))
+        d = new AnalysisDialog(QStringLiteral(".tran 0 10m 0 1u startup"), this);
+    else if (name == QLatin1String("settings"))
+        d = new SettingsDialog(this);
+    else if (name == QLatin1String("addtrace") && activeWaveform())
+        d = new AddTraceDialog(activeWaveform()->availableVectors(), this);
+    else if (name == QLatin1String("source") && firstWithPrefix('V') >= 0)
+        d = new SourceDialog(s->schematic().symbols[firstWithPrefix('V')], this);
+    else if (name == QLatin1String("passive") && firstWithPrefix('C') >= 0)
+        d = new PassiveDialog(s->schematic().symbols[firstWithPrefix('C')], this);
+    else if (name == QLatin1String("model") && firstWithPrefix('Q') >= 0)
+        d = new ModelSelectDialog(s->schematic().symbols[firstWithPrefix('Q')], this);
+    else if (name == QLatin1String("attributes") && s && !s->schematic().symbols.isEmpty())
+        d = new AttributeDialog(s->schematic().symbols.first(), this);
+    if (d)
+        d->show();
+    return d;
 }
 
 void MainWindow::firstRunCheck()

@@ -92,11 +92,13 @@ int main(int argc, char **argv)
     QCommandLineOption runOpt(QStringLiteral("run"), QStringLiteral("Run the active schematic before the screenshot."));
     QCommandLineOption probeOpt(QStringLiteral("probe"), QStringLiteral("Trace to plot (repeatable)."), QStringLiteral("expr"));
     QCommandLineOption sizeOpt(QStringLiteral("size"), QStringLiteral("Window size WxH."), QStringLiteral("size"));
+    QCommandLineOption dialogOpt(QStringLiteral("dialog"), QStringLiteral("Open a dialog for the screenshot."), QStringLiteral("name"));
+    dialogOpt.setFlags(QCommandLineOption::HiddenFromHelp);
     shotOpt.setFlags(QCommandLineOption::HiddenFromHelp);
     runOpt.setFlags(QCommandLineOption::HiddenFromHelp);
     probeOpt.setFlags(QCommandLineOption::HiddenFromHelp);
     sizeOpt.setFlags(QCommandLineOption::HiddenFromHelp);
-    parser.addOptions({shotOpt, runOpt, probeOpt, sizeOpt});
+    parser.addOptions({shotOpt, runOpt, probeOpt, sizeOpt, dialogOpt});
     parser.process(app);
 
     MainWindow w;
@@ -112,6 +114,8 @@ int main(int argc, char **argv)
         const QString out = parser.value(shotOpt);
         const bool run = parser.isSet(runOpt);
         const QStringList probes = parser.values(probeOpt);
+        const QString dialogName = parser.value(dialogOpt);
+        QWidget *dialog = nullptr;
         auto *timer = new QTimer(&w);
         int stage = 0;
         int waited = 0;
@@ -133,9 +137,14 @@ int main(int argc, char **argv)
             }
             if (stage == 2) {
                 stage = 3;
+                if (!dialogName.isEmpty())
+                    dialog = w.createDialogForTest(dialogName);
                 return; // let layouts settle
             }
-            w.grab().save(out);
+            if (dialog)
+                dialog->grab().save(out);
+            else
+                w.grab().save(out);
             timer->stop();
             QCoreApplication::quit();
         });

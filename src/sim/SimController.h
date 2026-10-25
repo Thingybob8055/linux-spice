@@ -61,6 +61,7 @@ private:
         QPointer<QProcess> proc;
         double percent = 0;
         bool done = false;
+        bool retried = false;
         int exitCode = -1;
         QString log;
         QString lineBuffer;

@@ -1,6 +1,7 @@
 #include "NetlistTranslator.h"
 
 #include "Expression.h"
+#include "Laplace.h"
 #include "ModelLibrary.h"
 #include "TextIO.h"
 #include "Units.h"
@@ -1592,8 +1593,14 @@ QStringList NetlistTranslator::translateBehavioral(const QString &lineIn)
     QString expr = rewriteCurrents(rewriteExpression(rest.trimmed()));
     if (expr.startsWith('{') && expr.endsWith('}'))
         expr = expr.mid(1, expr.size() - 2);
-    if (params.contains(QLatin1String("laplace"), Qt::CaseInsensitive))
-        m_res.warnings << QStringLiteral("%1: Laplace transfer functions are not supported; ignored").arg(head[0]);
+    if (params.contains(QLatin1String("laplace"), Qt::CaseInsensitive)) {
+        // The B expression is the input of the transfer function.
+        const QString inNode = internalNode(head[0], 51);
+        QStringList out;
+        out << QStringLiteral("%1_lin %2 0 V=%3").arg(name, inNode, expr);
+        out << laplaceSource(name, kind == 'V' ? QChar('E') : QChar('G'), n1, n2, QStringLiteral("%v(%1)").arg(inNode), params);
+        return out;
+    }
 
     QStringList out;
     switch (kind.unicode()) {
@@ -1669,10 +1676,11 @@ QStringList NetlistTranslator::translateControlled(const QStringList &t, const Q
         return {QStringLiteral("B%1 %2 %3 %4=(%5)*(%6)*uramp((%6)*(%7-(%8)))").arg(name, n1, n2, bkind, gain, dir, ctrl, vto)};
     }
     if (low.contains(QLatin1String("laplace="))) {
-        m_res.warnings << QStringLiteral("%1: Laplace transfer functions are not supported by ngspice; replaced by its DC gain of 1").arg(t[0]);
-        if (t.size() >= 5)
-            return {QStringLiteral("%1 %2 %3 %4 %5 1").arg(name, n1, n2, nodeToken(t[3]), nodeToken(t[4]))};
-        return {};
+        if (t.size() < 5) {
+            m_res.errors << QStringLiteral("%1: Laplace source needs controlling nodes").arg(t[0]);
+            return {};
+        }
+        return laplaceSource(name, k, n1, n2, QStringLiteral("%vd(%1 %2)").arg(nodeToken(t[3]), nodeToken(t[4])), line);
     }
     QStringList out = t;
     out[0] = name;
@@ -1700,6 +1708,15 @@ QStringList NetlistTranslator::translateControlled(const QStringList &t, const Q
 QStringList NetlistTranslator::translateSemiconductor(const QStringList &t)
 {
     const QChar k = t[0][0].toUpper();
+    // LTspice's idealized (piecewise-linear) diode: modelled behaviorally so that
+    // negative Vfwd/Vrev/epsilon behave as in LTspice.
+    if (k == 'D' && t.size() > 3) {
+        const QString modelLine = m_modelLines.value(t[3].toLower());
+        static const QRegularExpression ideal(QStringLiteral("\\b(ron|roff|vfwd|vrev|rrev|ilimit|revilimit|epsilon|revepsilon)\\s*="),
+                                              QRegularExpression::CaseInsensitiveOption);
+        if (!modelLine.isEmpty() && ideal.match(modelLine).hasMatch())
+            return translateIdealDiode(t, modelLine);
+    }
     QStringList out = t;
     out[0] = elementName(t[0]);
     int nodes = 2;
@@ -2013,6 +2030,98 @@ QStringList NetlistTranslator::translateSwitch(const QStringList &t)
     return out;
 }
 
+QStringList NetlistTranslator::translateIdealDiode(const QStringList &t, const QString &modelLine)
+{
+    QHash<QString, QString> mp;
+    QString body = modelLine;
+    const int open = body.indexOf('(');
+    if (open >= 0)
+        body = body.mid(open + 1, body.lastIndexOf(')') - open - 1);
+    else
+        body = body.section(QRegularExpression(QStringLiteral("\\s+")), 3);
+    for (const QString &tok : tokenize(normalizeEquals(body).replace(',', ' '))) {
+        const int eq = tok.indexOf('=');
+        if (eq > 0)
+            mp.insert(tok.left(eq).toLower(), tok.mid(eq + 1));
+    }
+    auto val = [&](const QString &key, const QString &def) {
+        QString v = mp.value(key, def);
+        if (v.startsWith('{') && v.endsWith('}'))
+            v = v.mid(1, v.size() - 2);
+        return QStringLiteral("{%1}").arg(rewriteExpression(v));
+    };
+    const QString name = elementName(t[0]);
+    const QString a = nodeToken(t[1]), c = nodeToken(t[2]);
+    // Instance multiplicity (m=) and series count (n=).
+    QString m = QStringLiteral("1"), n = QStringLiteral("1");
+    for (int i = 4; i < t.size(); ++i) {
+        const QString lp = t[i].toLower();
+        if (lp.startsWith(QLatin1String("m="))) m = t[i].mid(2);
+        else if (lp.startsWith(QLatin1String("n="))) n = t[i].mid(2);
+        else if (isNumeric(t[i])) m = t[i]; // area
+    }
+    const QString ron = val(QStringLiteral("ron"), QStringLiteral("1"));
+    const QString roff = val(QStringLiteral("roff"), QStringLiteral("1e12"));
+    const QString vfwd = val(QStringLiteral("vfwd"), QStringLiteral("0"));
+    const QString vrev = val(QStringLiteral("vrev"), QStringLiteral("1e30"));
+    const QString rrev = mp.contains(QStringLiteral("rrev")) ? val(QStringLiteral("rrev"), QStringLiteral("1")) : ron;
+    const QString eps = QStringLiteral("max(abs(%1),1e-9)").arg(val(QStringLiteral("epsilon"), QStringLiteral("0")));
+    const QString reps = QStringLiteral("max(abs(%1),1e-9)").arg(val(QStringLiteral("revepsilon"), QStringLiteral("0")));
+    const QString v = QStringLiteral("(V(%1,%2)/(%3))").arg(a, c, n);
+    // Smooth ramp: 0 below 0, quadratic over [0, e], linear above.
+    auto ramp = [](const QString &x, const QString &e) {
+        return QStringLiteral("((%1)<=0 ? 0 : ((%1)>=%2 ? (%1)-%2/2 : (%1)*(%1)/(2*%2)))").arg(x, e);
+    };
+    QString fwd = QStringLiteral("(1/%1-1/%2)*%3").arg(ron, roff, ramp(QStringLiteral("%1-%2").arg(v, vfwd), eps));
+    QString rev = QStringLiteral("(1/%1-1/%2)*%3").arg(rrev, roff, ramp(QStringLiteral("-%1-%2").arg(v, vrev), reps));
+    if (mp.contains(QStringLiteral("ilimit"))) {
+        const QString il = val(QStringLiteral("ilimit"), QStringLiteral("1e30"));
+        fwd = QStringLiteral("%1*tanh((%2)/%1)").arg(il, fwd);
+    }
+    if (mp.contains(QStringLiteral("revilimit"))) {
+        const QString il = val(QStringLiteral("revilimit"), QStringLiteral("1e30"));
+        rev = QStringLiteral("%1*tanh((%2)/%1)").arg(il, rev);
+    }
+    return {QStringLiteral("B%1 %2 %3 I=(%4)*(%5-%6+%7/%8)").arg(name, a, c, m, fwd, rev, v, roff)};
+}
+
+QStringList NetlistTranslator::laplaceSource(const QString &name, QChar kind, const QString &n1, const QString &n2, const QString &input,
+                                             const QString &line)
+{
+    // Extract the expression after "Laplace=" (up to an LTspice-only option or end of line).
+    static const QRegularExpression re(QStringLiteral("laplace\\s*=\\s*(.*?)(\\s+(window|nfft|mtol)\\s*=.*)?$"),
+                                       QRegularExpression::CaseInsensitiveOption);
+    const auto m = re.match(line);
+    if (!m.hasMatch()) {
+        m_res.errors << QStringLiteral("%1: cannot read Laplace expression").arg(name);
+        return {};
+    }
+    QString expr = m.captured(1).trimmed();
+    if (expr.startsWith('{') && expr.endsWith('}'))
+        expr = expr.mid(1, expr.size() - 2);
+    g_params = &m_res.params;
+    QString err;
+    const auto tf = laplace::parse(expr, [](const QString &id) -> std::optional<double> {
+        if (!g_params || !g_params->contains(id.toLower()))
+            return std::nullopt;
+        const double v = evalParamExpr(g_params->value(id.toLower()));
+        if (std::isnan(v))
+            return std::nullopt;
+        return v;
+    }, &err);
+    if (!tf) {
+        m_res.errors << QStringLiteral("%1: %2").arg(name, err);
+        return {};
+    }
+    if (tf->num.size() > tf->den.size())
+        m_res.warnings << QStringLiteral("%1: improper Laplace transfer function (numerator order > denominator order)").arg(name);
+    const QString model = QStringLiteral("lsxfer_%1").arg(QString(name).toLower().replace(QRegularExpression(QStringLiteral("[^a-z0-9_]")), QStringLiteral("_")));
+    const QString outPort = kind == 'G' ? QStringLiteral("%id(%1 %2)").arg(n1, n2) : QStringLiteral("%vd(%1 %2)").arg(n1, n2);
+    return {QStringLiteral("A%1_lap %2 %3 %4").arg(name, input, outPort, model),
+            QStringLiteral(".model %1 s_xfer(gain=1 num_coeff=%2 den_coeff=%3)")
+                .arg(model, laplace::coeffList(tf->num), laplace::coeffList(tf->den))};
+}
+
 QStringList NetlistTranslator::translateMutual(const QStringList &t)
 {
     // K1 L1 L2 [L3 ...] coupling
@@ -2130,9 +2239,16 @@ QString NetlistTranslator::translateAnalysis(const QString &line)
         return out;
     }
     if (kw == QLatin1String(".ac")) {
-        if (t.size() >= 2 && t[1].compare(QLatin1String("list"), Qt::CaseInsensitive) == 0) {
-            m_res.errors << QStringLiteral(".ac list is not supported by ngspice");
-            return QString();
+        if (t.size() >= 3 && t[1].compare(QLatin1String("list"), Qt::CaseInsensitive) == 0) {
+            // ngspice has no list sweep: one frequency maps to "lin 1 f f"; several to a log sweep across them.
+            QList<double> fs;
+            for (int i = 2; i < t.size(); ++i)
+                fs << numberOr(t[i], 0);
+            std::sort(fs.begin(), fs.end());
+            if (fs.size() == 1)
+                return QStringLiteral(".ac lin 1 %1 %1").arg(fs[0], 0, 'g', 12);
+            m_res.warnings << QStringLiteral(".ac list is approximated by a logarithmic sweep over the listed range");
+            return QStringLiteral(".ac dec 50 %1 %2").arg(fs.first(), 0, 'g', 12).arg(fs.last(), 0, 'g', 12);
         }
         return t.join(' ');
     }
@@ -2159,6 +2275,16 @@ QString NetlistTranslator::translateAnalysis(const QString &line)
         // .noise V(out[,ref]) src dec pts fstart fstop
         if (t.size() >= 3)
             t[2] = elementName(t[2]);
+        if (t.size() >= 5 && t[3].compare(QLatin1String("list"), Qt::CaseInsensitive) == 0) {
+            QList<double> fs;
+            for (int i = 4; i < t.size(); ++i)
+                fs << numberOr(t[i], 0);
+            std::sort(fs.begin(), fs.end());
+            const QString head = t.mid(0, 3).join(' ');
+            if (fs.size() == 1)
+                return QStringLiteral("%1 lin 1 %2 %2").arg(head).arg(fs[0], 0, 'g', 12);
+            return QStringLiteral("%1 dec 50 %2 %3").arg(head).arg(fs.first(), 0, 'g', 12).arg(fs.last(), 0, 'g', 12);
+        }
         return t.join(' ');
     }
     if (kw == QLatin1String(".tf")) {
