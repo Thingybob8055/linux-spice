@@ -6,6 +6,7 @@
 #include "TextIO.h"
 #include "Units.h"
 
+#include <cstring>
 #include <functional>
 #include <QDir>
 #include <QFileInfo>
@@ -1580,7 +1581,13 @@ QStringList NetlistTranslator::translateSource(const QStringList &t)
                 func += QStringLiteral(" r=0");
             if (!td.isEmpty())
                 func += QStringLiteral(" td=%1").arg(td);
-        } else if (lowt.startsWith(QLatin1String("wavefile=")) || lowt.startsWith(QLatin1String("tbl=")) || lowt.startsWith(QLatin1String("trigger="))) {
+        } else if (lowt.startsWith(QLatin1String("wavefile="))) {
+            int chan = 0;
+            for (const QString &o : rest)
+                if (o.toLower().startsWith(QLatin1String("chan=")))
+                    chan = int(numberOr(o.mid(5), 0));
+            func = QStringLiteral("PWL(%1)").arg(pwlFromWav(tok.mid(9), chan));
+        } else if (lowt.startsWith(QLatin1String("tbl=")) || lowt.startsWith(QLatin1String("trigger="))) {
             m_res.warnings << QStringLiteral("%1: \"%2\" sources are not supported; using 0").arg(t[0], tok.section('=', 0, 0));
             dc = QStringLiteral("0");
         } else if (lowt.startsWith(QLatin1String("chan="))) {
@@ -3027,4 +3034,78 @@ QStringList NetlistTranslator::translateIgbt(const QStringList &t, const QString
     m_res.warnings << QStringLiteral("%1: IGBT simulated with a Hefner-equation behavioral model (static curves match LTspice's closely; "
                                      "switching transients are approximate)").arg(t[0]);
     return out;
+}
+
+QString NetlistTranslator::pwlFromWav(const QString &fileIn, int channel)
+{
+    // LTspice plays a .wav file as a voltage: full scale is +-1V (8-bit samples map to
+    // (b-128)/127), sample k at time k/rate.
+    QString file = fileIn;
+    if (file.startsWith('"') && file.endsWith('"'))
+        file = file.mid(1, file.size() - 2);
+    QString path = file;
+    if (!QFileInfo(path).isAbsolute())
+        path = QDir(m_opts.baseDir).filePath(file.replace('\\', '/'));
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly)) {
+        m_res.errors << QStringLiteral("Cannot open wave file \"%1\"").arg(fileIn);
+        return QStringLiteral("0 0");
+    }
+    const QByteArray d = f.readAll();
+    auto u16 = [&d](qsizetype i) { return quint16(quint8(d[i]) | quint8(d[i + 1]) << 8); };
+    auto u32 = [&u16](qsizetype i) { return quint32(u16(i)) | quint32(u16(i + 2)) << 16; };
+    if (d.size() < 12 || !d.startsWith("RIFF") || d.mid(8, 4) != "WAVE") {
+        m_res.errors << QStringLiteral("\"%1\" is not a WAV file").arg(fileIn);
+        return QStringLiteral("0 0");
+    }
+    int format = 0, channels = 0, bits = 0;
+    quint32 rate = 0;
+    qsizetype dataPos = -1, dataLen = 0;
+    for (qsizetype pos = 12; pos + 8 <= d.size();) {
+        const QByteArray id = d.mid(pos, 4);
+        const quint32 len = u32(pos + 4);
+        if (id == "fmt " && pos + 24 <= d.size()) {
+            format = u16(pos + 8);
+            channels = u16(pos + 10);
+            rate = u32(pos + 12);
+            bits = u16(pos + 22);
+            if (format == 0xFFFE && len >= 26 && pos + 34 <= d.size())
+                format = u16(pos + 32); // WAVE_FORMAT_EXTENSIBLE: sub-format
+        } else if (id == "data") {
+            dataPos = pos + 8;
+            dataLen = std::min<qsizetype>(len, d.size() - dataPos);
+            break;
+        }
+        pos += 8 + len + (len & 1);
+    }
+    const int bytes = bits / 8;
+    if (dataPos < 0 || rate == 0 || channels <= 0 || bytes <= 0 || (format != 1 && format != 3)) {
+        m_res.errors << QStringLiteral("Unsupported WAV format in \"%1\"").arg(fileIn);
+        return QStringLiteral("0 0");
+    }
+    channel = std::clamp(channel, 0, channels - 1);
+    const qsizetype frames = dataLen / (qsizetype(bytes) * channels);
+    QStringList pts;
+    pts.reserve(frames);
+    for (qsizetype k = 0; k < frames; ++k) {
+        const qsizetype at = dataPos + (k * channels + channel) * bytes;
+        double v = 0;
+        if (format == 3 && bytes == 4) {
+            const quint32 raw = u32(at);
+            float fv;
+            std::memcpy(&fv, &raw, 4);
+            v = fv;
+        } else if (bytes == 1) {
+            v = (quint8(d[at]) - 128) / 127.0;
+        } else {
+            qint64 iv = 0;
+            for (int b = 0; b < bytes; ++b)
+                iv |= qint64(quint8(d[at + b])) << (8 * b);
+            const qint64 sign = qint64(1) << (8 * bytes - 1);
+            iv = (iv ^ sign) - sign; // sign-extend
+            v = double(iv) / double(sign - 1);
+        }
+        pts << QStringLiteral("%1 %2").arg(double(k) / rate, 0, 'g', 12).arg(v, 0, 'g', 7);
+    }
+    return pts.isEmpty() ? QStringLiteral("0 0") : pts.join(' ');
 }
