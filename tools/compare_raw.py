@@ -119,9 +119,10 @@ def compare(ref, test, step=0):
         yr = rs[name]
         yt = ts[name]
         if ref["complex"]:
-            # Compare magnitude in dB.
-            yr = [20 * math.log10(max(abs(c), 1e-30)) for c in yr]
-            yt = [20 * math.log10(max(abs(c), 1e-30)) for c in yt]
+            # Compare magnitude in dB, floored at -200 dB so numerical noise on
+            # nodes with no AC signal does not dominate.
+            yr = [20 * math.log10(max(abs(c), 1e-10)) for c in yr]
+            yt = [20 * math.log10(max(abs(c), 1e-10)) for c in yt]
             span = max(max(yr) - min(yr), 1.0)
         else:
             span = max(max(yr) - min(yr), 1e-3 * max(1.0, max(abs(v) for v in yr)), 1e-6)

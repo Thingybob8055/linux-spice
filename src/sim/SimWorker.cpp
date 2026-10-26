@@ -417,8 +417,16 @@ int runSimWorker(int argc, char **argv)
                                               "current-density", "sqr-voltage-density", "sqr-current-density", "sqr-voltage",
                                               "sqr-current", "pole", "zero", "s-param", "temp-sweep", "res-sweep",
                                               "impedance", "admittance", "power", "phase", "decibel", "capacitance", "charge"};
-            std::fprintf(raw, "Title: %s\nDate: \nPlotname: %s\nFlags: %s\nNo. Variables: %d\nNo. Points: %d\nVariables:\n",
-                         plot.c_str(), plotName.c_str(), complex ? "complex" : "real", int(keep.size()), npts);
+            // LTspice's layout: UTF-16LE header; real data stores the scale as double and every
+            // other vector as float32 (half the size of all-double files).
+            std::string hdr;
+            auto add = [&hdr](const char *fmt, auto... args) {
+                char line[4096];
+                std::snprintf(line, sizeof line, fmt, args...);
+                hdr += line;
+            };
+            add("Title: %s\nDate: \nPlotname: %s\nFlags: %s\nNo. Variables: %d\nNo. Points: %d\nVariables:\n",
+                plot.c_str(), plotName.c_str(), complex ? "complex" : "real", int(keep.size()), npts);
             for (size_t i = 0; i < keep.size(); ++i) {
                 const int t = keep[i].info.v_type;
                 const char *tn = (t >= 0 && t < int(sizeof typeNames / sizeof *typeNames)) ? typeNames[t] : "notype";
@@ -432,20 +440,32 @@ int runSimWorker(int argc, char **argv)
                     else if (name.find_first_of("(@#") == std::string::npos && prefix != "noise" && prefix != "tf")
                         name = "v(" + name + ")";
                 }
-                std::fprintf(raw, "\t%d\t%s\t%s\n", int(i), name.c_str(), tn);
+                add("\t%d\t%s\t%s\n", int(i), name.c_str(), tn);
             }
-            std::fprintf(raw, "Binary:\n");
-            std::vector<double> row;
+            hdr += "Binary:\n";
+            for (unsigned char c : hdr) {
+                const char u16[2] = {char(c), 0};
+                std::fwrite(u16, 1, 2, raw);
+            }
+            std::vector<char> row;
             for (int p = 0; p < npts; ++p) {
                 row.clear();
-                for (const auto &v : keep) {
-                    double re = v.info.v_realdata ? v.info.v_realdata[p] : v.info.v_compdata[p].cx_real;
-                    double im = v.info.v_realdata ? 0.0 : v.info.v_compdata[p].cx_imag;
-                    row.push_back(re);
-                    if (complex)
-                        row.push_back(im);
+                for (size_t i = 0; i < keep.size(); ++i) {
+                    const auto &v = keep[i];
+                    const double re = v.info.v_realdata ? v.info.v_realdata[p] : v.info.v_compdata[p].cx_real;
+                    const double im = v.info.v_realdata ? 0.0 : v.info.v_compdata[p].cx_imag;
+                    auto put = [&row](const void *d, size_t n) { row.insert(row.end(), (const char *)d, (const char *)d + n); };
+                    if (complex) {
+                        put(&re, 8);
+                        put(&im, 8);
+                    } else if (i == 0) {
+                        put(&re, 8);
+                    } else {
+                        const float f = float(re);
+                        put(&f, 4);
+                    }
                 }
-                std::fwrite(row.data(), sizeof(double), row.size(), raw);
+                std::fwrite(row.data(), 1, row.size(), raw);
             }
             ++written;
             emit("PLOT", plot);

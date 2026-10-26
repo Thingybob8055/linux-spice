@@ -1372,6 +1372,16 @@ QStringList NetlistTranslator::translatePassive(const QStringList &t)
     if (!ic.isEmpty())
         core += QStringLiteral(" ic=%1").arg(ic);
     out << core;
+    // LTspice applies a capacitor's ic= as a constraint on the initial operating point; ngspice
+    // only honours it with "uic". A stiff conductance pulling the capacitor to its initial voltage
+    // while time=0 (the operating point) reproduces that. Not for .ac/.noise/.tf: the constraint
+    // would stay in their linearization.
+    if (k == 'C' && !ic.isEmpty() && (m_res.analysis == QLatin1String("tran") || m_res.analysis == QLatin1String("op"))) {
+        QString icv = ic;
+        if (units::isBraced(icv))
+            icv = icv.mid(1, icv.size() - 2);
+        out << QStringLiteral("B%1_ic %2 %3 I=(time<=0 ? 1e4*(V(%2,%3)-(%4)) : 0)").arg(QString(name).replace(QChar(0xA7), '_'), a, n2, icv);
+    }
     if (!rpar.isEmpty())
         out << QStringLiteral("R%1_rpar %2 %3 %4").arg(name, n1, n2, rpar);
     if (!cpar.isEmpty() && numberOr(cpar, 1.0) != 0.0)
@@ -1792,7 +1802,7 @@ QStringList NetlistTranslator::translateSemiconductor(const QStringList &t)
         modelType = QStringLiteral("VDMOS");
     }
     if (k == 'Z' && (modelType == QLatin1String("NIGBT") || modelType == QLatin1String("PIGBT")))
-        m_res.errors << QStringLiteral("%1: IGBT models are not supported by ngspice").arg(t[0]);
+        return translateIgbt(t, m_modelLines.value(out[modelIdx].toLower()), modelType == QLatin1String("PIGBT"));
 
     // Instance parameters: drop LTspice-only ones, handle diode series count n=.
     QStringList params;
@@ -1867,13 +1877,16 @@ QStringList NetlistTranslator::translateDigital(const QStringList &t)
         return nodeToken(n);
     };
     QStringList out;
-    // A held state: B source -> R -> C; the expression reads the capacitor node.
+    // A held state: B source -> R -> C; the expression reads the capacitor node. The 1ns time
+    // constant must not be far below the simulator's timestep at clock edges: otherwise the
+    // capacitor has no memory at that scale, the hold loop becomes algebraic with two solutions
+    // (0 and 1), and Newton can settle on either (a toggle flip-flop then follows its clock).
     auto stateNode = [&](const QString &suffix, const QString &nextExpr) {
         const QString st = internalNode(t[0], 10 + suffix.size());
         const QString stc = st + QStringLiteral("c");
         out << QStringLiteral("B%1_%2 %3 %4 V=%5").arg(name, suffix, st, com, nextExpr);
         out << QStringLiteral("R%1_%2 %3 %4 1k").arg(name, suffix, st, stc);
-        out << QStringLiteral("C%1_%2 %3 %4 10f").arg(name, suffix, stc, com);
+        out << QStringLiteral("C%1_%2 %3 %4 1p").arg(name, suffix, stc, com);
         return stc;
     };
     auto hold = [&](const QString &stc) { return QStringLiteral("(V(%1,%2)>0.5 ? 1 : 0)").arg(stc, com); };
@@ -1932,20 +1945,42 @@ QStringList NetlistTranslator::translateDigital(const QStringList &t)
         stateNode(QStringLiteral("s"), QStringLiteral("(%1 ? 1 : (%2 ? 0 : %3))").arg(sExpr, rExpr, hold(stc)));
         logic = hold(stc);
     } else if (model == QLatin1String("DFLOP")) {
-        // Master-slave: master follows D while CLK is low, slave copies master while CLK is high.
+        // Edge-triggered storage uses ngspice's event-driven XSPICE flip-flop: a latch built from
+        // behavioral sources decides "hold" from the current Newton iterate rather than the
+        // previous time point, and with timesteps longer than its time constant both states solve
+        // the equations (a divide-by-two flip-flop then occasionally misses a toggle).
         const QString d = pin(1), clk = pin(3), pre = pin(4), clr = pin(5);
-        const QString dExpr = d.isEmpty() ? QStringLiteral("0") : in(d);
-        const QString cExpr = clk.isEmpty() ? QStringLiteral("0") : in(clk);
-        const QString mc = internalNode(t[0], 11) + QStringLiteral("c");
-        const QString sc = internalNode(t[0], 12) + QStringLiteral("c");
-        stateNode(QStringLiteral("m"), QStringLiteral("(%1 ? %2 : (%3 ? 1 : 0))").arg(cExpr, hold(mc), dExpr));
-        QString slave = QStringLiteral("(%1 ? %2 : %3)").arg(cExpr, hold(mc), hold(sc));
-        if (!clr.isEmpty())
-            slave = QStringLiteral("(%1 ? 0 : %2)").arg(in(clr), slave);
-        if (!pre.isEmpty())
-            slave = QStringLiteral("(%1 ? 1 : %2)").arg(in(pre), slave);
-        stateNode(QStringLiteral("sl"), slave);
-        logic = hold(sc);
+        const QString base = QString(name).toLower();
+        auto digIn = [&](const QString &n, const QString &tag) -> QString {
+            if (n.isEmpty())
+                return QStringLiteral("NULL");
+            QString src = n;
+            if (com != QLatin1String("0")) {
+                src = internalNode(t[0], 30 + tag.size()) + tag;
+                out << QStringLiteral("B%1_r%2 %3 0 V=V(%4,%5)").arg(name, tag, src, n, com);
+            }
+            const QString dn = QStringLiteral("%1_d%2").arg(base, tag);
+            out << QStringLiteral("A%1_i%2 [%3] [%4] %5_adc").arg(name, tag, src, dn, base);
+            return dn;
+        };
+        const QString dD = d.isEmpty() ? QString() : digIn(d, QStringLiteral("d"));
+        const QString dC = digIn(clk, QStringLiteral("c"));
+        const QString dS = digIn(pre, QStringLiteral("s"));
+        const QString dR = digIn(clr, QStringLiteral("r"));
+        out << QStringLiteral(".model %1_adc adc_bridge(in_low=%2 in_high=%2 rise_delay=1e-12 fall_delay=1e-12)").arg(base).arg(ref, 0, 'g', 12);
+        QString dataNode = dD;
+        if (dataNode.isEmpty()) {
+            dataNode = base + QStringLiteral("_dzero");
+            out << QStringLiteral("A%1_z %2 %3_zero").arg(name, dataNode, base);
+            out << QStringLiteral(".model %1_zero d_pulldown").arg(base);
+        }
+        const double dly = 1e-12; // Td is applied by the output stage (drive)
+        out << QStringLiteral("A%1_ff %2 %3 %4 %5 %6_q %6_qb %6_ffm").arg(name, dataNode, dC, dS, dR, base);
+        out << QStringLiteral(".model %1_ffm d_dff(clk_delay=%2 set_delay=%2 reset_delay=%2 rise_delay=1e-12 fall_delay=1e-12)").arg(base).arg(dly, 0, 'g', 12);
+        const QString aq = internalNode(t[0], 35);
+        out << QStringLiteral("A%1_o [%2_q] [%3] %2_dac").arg(name, base, aq);
+        out << QStringLiteral(".model %1_dac dac_bridge(out_low=0 out_high=1 out_undef=0.5 t_rise=1e-12 t_fall=1e-12)").arg(base);
+        logic = QStringLiteral("V(%1)").arg(aq);
     } else if (model == QLatin1String("OTA")) {
         // Transconductance amplifier: I(out) = G * (V(in+,in-) + ref) [* V(mult+,mult-)],
         // limited to [Isink, Iout] (unless "linear") and clamped to the output compliance range.
@@ -2136,6 +2171,31 @@ QStringList NetlistTranslator::translateSwitch(const QStringList &t)
     const QString ron = val(QStringLiteral("ron"), QStringLiteral("1"));
     const QString roff = val(QStringLiteral("roff"), QStringLiteral("1e12"));
     QStringList out;
+    if (num(QStringLiteral("level"), 1) == 2) {
+        // Level 2 (documented): g(Vc) = exp(A*atan((Vc-Vt)/|Vh|) + B), A = ln(Roff/Ron)/pi,
+        // B = ln(1/(Roff*Ron))/2, and I = Ilimit*tanh(g*V/Ilimit) with Ilimit defaulting to 10A
+        // (the help writes tanh(g*V); the current must be normalized for the limit to make sense).
+        // Vser or "oneway" make it conduct only from n2 to n1 (as the op-amp macromodels' rail
+        // switches "S1 out V+ ..." and "S2 V- out ..." require), once V(n2,n1) exceeds Vser;
+        // epsilon rounds that corner.
+        const QString g = QStringLiteral("pow(2.718281828459045,ln(%1/%2)/pi*atan((%3-(%4))/max(abs(%5),1e-12))+ln(1/(%1*%2))/2)").arg(roff, ron, x, vt, vh);
+        const QString il = val(QStringLiteral("ilimit"), QStringLiteral("10"));
+        if (mp.contains(QStringLiteral("vser")) || mp.contains(QStringLiteral("oneway"))) {
+            // A zero Vser (often a parameter, e.g. Vser={Rail}) leaves the switch bidirectional.
+            const QString vs = val(QStringLiteral("vser"), QStringLiteral("0"));
+            const QString eps = QStringLiteral("max(abs(%1),1e-9)").arg(val(QStringLiteral("epsilon"), QStringLiteral("0")));
+            const QString u = QStringLiteral("(V(%1,%2)-(%3))").arg(b, a, vs);
+            const QString veff = QStringLiteral("(%1<=0 ? 0 : (%1>=%2 ? %1-%2/2 : %1*%1/(2*%2)))").arg(u, eps);
+            const QString oneway = QStringLiteral("%1*tanh(%2*%3/%1)").arg(il, g, veff);
+            const QString both = QStringLiteral("%1*tanh(%2*V(%3,%4)/%1)").arg(il, g, b, a);
+            out << QStringLiteral("B%1 %2 %3 I=%4").arg(name, b, a,
+                                                        mp.contains(QStringLiteral("oneway")) ? oneway
+                                                                                             : QStringLiteral("((%1) != 0 ? %2 : %3)").arg(vs, oneway, both));
+        } else {
+            out << QStringLiteral("B%1 %2 %3 I=%4*tanh(%5*V(%2,%3)/%4)").arg(name, a, b, il, g);
+        }
+        return out;
+    }
     QString st; // 0..1 switch state
     if (vhNegative || num(k == 'S' ? QStringLiteral("vh") : QStringLiteral("ih"), 0) == 0) {
         // Smooth transition between vt-|vh| and vt+|vh| (a tiny window when vh=0).
@@ -2147,11 +2207,11 @@ QStringList NetlistTranslator::translateSwitch(const QStringList &t)
         const QString n1 = internalNode(t[0], 41), n2 = internalNode(t[0], 42);
         out << QStringLiteral("B%1_st %2 0 V=(%3 > %4+%5 ? 1 : (%3 < %4-%5 ? 0 : (V(%6) > 0.5 ? 1 : 0)))").arg(name, n1, x, vt, vh, n2);
         out << QStringLiteral("R%1_st %2 %3 1k").arg(name, n1, n2);
-        out << QStringLiteral("C%1_st %2 0 10f").arg(name, n2);
+        out << QStringLiteral("C%1_st %2 0 1p").arg(name, n2); // 1ns: see stateNode in translateDigital
         st = QStringLiteral("V(%1)").arg(n2);
     }
     // Conductance interpolated logarithmically between Goff and Gon.
-    const QString g = QStringLiteral("exp(ln(1/%1)+%2*(ln(1/%3)-ln(1/%1)))").arg(roff, st, ron);
+    const QString g = QStringLiteral("pow(2.718281828459045,ln(1/%1)+%2*(ln(1/%3)-ln(1/%1)))").arg(roff, st, ron);
     const QString v = QStringLiteral("V(%1,%2)").arg(a, b);
     QString veff = v;
     if (mp.contains(QStringLiteral("vser"))) {
@@ -2390,6 +2450,10 @@ QString NetlistTranslator::translateModel(const QString &lineIn)
     static const QRegularExpression ratings(QStringLiteral("\\s*\\b(vceo|icrating|vds|qg|iave|vpk|ipk|ron_rating|pdiss)\\s*=\\s*[^\\s)]+"),
                                             QRegularExpression::CaseInsensitiveOption);
     line.replace(ratings, QString());
+    // IGBTs are expanded into behavioral elements by translateIgbt(); ngspice has no such model type.
+    static const QRegularExpression igbtRe(QStringLiteral("^\\.model\\s+\\S+\\s+[NP]IGBT\\b"), QRegularExpression::CaseInsensitiveOption);
+    if (igbtRe.match(line).hasMatch())
+        return QStringLiteral("* ") + line;
     // Model type aliases.
     static const QRegularExpression typeRe(QStringLiteral("^(\\.model\\s+\\S+\\s+)(LPNP)\\b"), QRegularExpression::CaseInsensitiveOption);
     line.replace(typeRe, QStringLiteral("\\1PNP"));
@@ -2802,5 +2866,148 @@ QStringList NetlistTranslator::floatingNodeShunts(const QStringList &elements)
         done.insert(r);
         out << QStringLiteral("R__dcpath%1 %2 0 1T").arg(++idx).arg(n);
     }
+    return out;
+}
+
+QStringList NetlistTranslator::translateIgbt(const QStringList &t, const QString &modelLine, bool pChannel)
+{
+    // Hefner IGBT (the model LTspice documents for NIGBT/PIGBT): a MOSFET channel feeding the
+    // wide n- base of a PNP whose stored charge Q is a state variable.
+    //   Imos  = KF*KP*((Vgs-Vt)*Vds - KF*Vds^2/2)/(1+Theta*(Vgs-Vt)) (triode),
+    //           KP*(Vgs-Vt)^2/2/(1+Theta*(Vgs-Vt)) (saturation)
+    //   dQ/dt = Imos - Q/Tau - Q^2*4*Isne*NB^2/(ni^2*QB^2),  QB = q*A*W*NB
+    //   holes collected at the emitter: Imos/b + 4*Dp*Q/W^2,  b = MUN/MUP
+    //   anode junction: p0*(p0+NB) = ni^2*exp(Vae/Vt), Q = q*A*L*p0*tanh(W/(2L))
+    //   base width W = WB minus the base-collector depletion width; the base resistance is
+    //   conductivity modulated by Q. Cgs is linear, Cgd and Cds follow depletion widths.
+    QHash<QString, double> mp{{QStringLiteral("agd"), 5e-6}, {QStringLiteral("area"), 1e-5}, {QStringLiteral("cgs"), 1.24e-8},
+                              {QStringLiteral("coxd"), 3.5e-8}, {QStringLiteral("jsne"), 6.5e-13}, {QStringLiteral("kf"), 1.0},
+                              {QStringLiteral("kp"), 0.38}, {QStringLiteral("mun"), 1500}, {QStringLiteral("mup"), 450},
+                              {QStringLiteral("nb"), 2e14}, {QStringLiteral("tau"), 7.1e-6}, {QStringLiteral("theta"), 0.02},
+                              {QStringLiteral("vt"), 4.7}, {QStringLiteral("vtd"), 1e-3}, {QStringLiteral("wb"), 9e-5},
+                              {QStringLiteral("subthres"), 0.02}};
+    {
+        QString body = modelLine;
+        const int open = body.indexOf('(');
+        if (open >= 0)
+            body = body.mid(open + 1, body.lastIndexOf(')') - open - 1);
+        else
+            body = body.section(QRegularExpression(QStringLiteral("\\s+")), 3);
+        for (const QString &tok : tokenize(normalizeEquals(body).replace(',', ' '))) {
+            const int eq = tok.indexOf('=');
+            if (eq > 0 && mp.contains(tok.left(eq).toLower()))
+                mp[tok.left(eq).toLower()] = numberOr(tok.mid(eq + 1), mp.value(tok.left(eq).toLower()));
+        }
+    }
+    // Instance: Z C G E model [area] [m=..]
+    double areaFactor = 1.0, mult = 1.0;
+    for (int i = 5; i < t.size(); ++i) {
+        const QString lp = t[i].toLower();
+        if (lp.startsWith(QLatin1String("m=")))
+            mult = numberOr(t[i].mid(2), 1.0);
+        else if (lp.startsWith(QLatin1String("area=")))
+            areaFactor = numberOr(t[i].mid(5), 1.0);
+        else if (isNumeric(t[i]))
+            areaFactor = numberOr(t[i], 1.0);
+    }
+    const double q = 1.602176634e-19, vth = 1.380649e-23 * 300.15 / q, eps = 11.7 * 8.854187817e-14, ni = 1.45e10;
+    const double A = mp["area"] * 1e4 * areaFactor * mult; // cm^2
+    const double agd = std::min(mp["agd"] * 1e4 * areaFactor * mult, A);
+    const double nb = mp["nb"], wb = mp["wb"] * 100, b = mp["mun"] / mp["mup"];
+    const double dn = mp["mun"] * vth, dp = mp["mup"] * vth, damb = 2 * dn * dp / (dn + dp);
+    const double l = std::sqrt(damb * mp["tau"]);
+    const double kdep = std::sqrt(2 * eps / (q * nb));
+    const double isne = mp["jsne"] * A;
+    const double kc = 4 * isne * nb * nb / (ni * ni * std::pow(q * A * nb, 2)); // c = kc/W^2
+    const double s = pChannel ? -1.0 : 1.0;
+    auto num = [](double v) { return QString::number(v, 'g', 12); };
+    // Smooth max(u,0): square roots of depletion voltages need a finite derivative at the corner.
+    auto pos = [](const QString &u) { return QStringLiteral("(0.5*((%1)+sqrt((%1)*(%1)+1e-4)))").arg(u); };
+
+    const QString name = elementName(t[0]);
+    const QString c = nodeToken(t[1]), g = nodeToken(t[2]), e = nodeToken(t[3]);
+    const QString a = internalNode(t[0], 81), d = internalNode(t[0], 82), nvae = internalNode(t[0], 83);
+    // Helper nodes hold shared subexpressions (ngspice differentiates each behavioral expression
+    // symbolically, so repeating them makes every evaluation far slower).
+    const QString nvgt = internalNode(t[0], 84), nim = internalNode(t[0], 85), nw = internalNode(t[0], 86), nq = internalNode(t[0], 87);
+    const QString sg = num(s);
+    const QString vgs = QStringLiteral("(%1*V(%2,%3))").arg(sg, g, e);
+    const QString vds = QStringLiteral("(%1*V(%2,%3))").arg(sg, d, e);
+    // The node holds W in um; floored where used, since Newton starts every node at 0V.
+    const QString w = QStringLiteral("(max(V(%1),%2)*1e-4)").arg(nw, num(wb * 0.01 * 1e4));
+    const QString qs = QStringLiteral("(V(%1)*1e-6)").arg(nq); // node holds Q in uC
+    // Q clamped positive smoothly where it must be (carrier density, conductivity): a hard max()
+    // kink stalls Newton exactly where the off-state solution sits.
+    const QString qq = QStringLiteral("(0.5*(V(%1)+sqrt(V(%1)*V(%1)+1e-30))*1e-6)").arg(nq);
+    const double sub = std::max(mp["subthres"], 1e-4);
+    QStringList out;
+    // Base width W = WB minus the base-collector depletion width (kept above 1% of WB).
+    out << QStringLiteral("B%1_w %2 0 V=1e4*max(%3-%4*sqrt(%5),%6)").arg(name, nw, num(wb), num(kdep), pos(vds + QStringLiteral("+0.6")), num(wb * 0.01));
+    // Softplus threshold (subthreshold conduction), written so exp() never sees a large argument.
+    const QString y = QStringLiteral("(%1-%2)").arg(vgs, num(mp["vt"]));
+    out << QStringLiteral("B%1_vgt %2 0 V=max(%4,0)+%3*ln(1+exp(-abs(%4)/%3))").arg(name, nvgt, num(sub), y);
+    const QString vgt = QStringLiteral("V(%1)").arg(nvgt);
+    const QString den = QStringLiteral("(1+%1*%2)").arg(num(mp["theta"]), vgt);
+    const QString kf = num(mp["kf"]), kp = num(mp["kp"]);
+    out << QStringLiteral("B%1_im %2 0 V=(%3>=%4/%5 ? %6*%4*%4/2/%7 : %5*%6*(%4*%3-%5*%3*%3/2)/%7)").arg(name, nim, vds, vgt, kf, kp, den);
+    const QString imos = QStringLiteral("V(%1)").arg(nim);
+    out << QStringLiteral("B%1_mos %2 %3 I=%4*%5").arg(name, d, e, sg, imos);
+    // Base charge Q and anode junction voltage Vae: p0*(p0+NB) = ni^2*exp(Vae/Vt),
+    // Q = q*A*L*p0*tanh(W/(2L)), dQ/dt = Imos - Q/Tau - Q^2*4*Isne*NB^2/(ni^2*QB^2).
+    // DC sweeps solve for Vae (diode-like conditioning: fast and robust at low Vce); everything
+    // else integrates Q on a linear capacitor and derives Vae from it, which is what keeps
+    // switching transients stable. Both give the same static solution.
+    const bool dcSweep = m_res.analysis == QLatin1String("dc");
+    if (dcSweep) {
+        // pow() rather than exp(): ngspice caps exp() arguments at 14 in LTspice-compatibility mode;
+        // above 60*Vt the exponential continues linearly (as SPICE junction models limit it).
+        // Under reverse bias Q no longer depends on Vae, so a 1nS term anchors the node near 0V.
+        const QString ev = QStringLiteral("(pow(2.718281828459045,min(V(%1)/%2,60))*(1+max(V(%1)/%2-60,0)))").arg(nvae, num(vth));
+        const QString x = QStringLiteral("(%1*(%2-1))").arg(num(ni * ni), ev);
+        out << QStringLiteral("B%1_qv %2 0 V=1e6*%3*tanh(%4/%5)*2*%6/(%7+sqrt(%8+4*%6))")
+                   .arg(name, nq, num(q * A * l), w, num(2 * l), x, num(nb), num(nb * nb));
+        out << QStringLiteral("B%1_bal 0 %2 I=%3-%4/%5-%6*%4*abs(%4)/(%7*%7)-1e-9*V(%2)").arg(name, nvae, imos, qs, num(mp["tau"]), num(kc), w);
+        out << QStringLiteral("R%1_bal %2 0 1e15").arg(name, nvae);
+        out << QStringLiteral("B%1_ae %2 %3 V=%4*V(%5)").arg(name, c, a, sg, nvae);
+    } else {
+        out << QStringLiteral("B%1_q 0 %2 I=%3-%4/%5-%6*%4*abs(%4)/(%7*%7)").arg(name, nq, imos, qs, num(mp["tau"]), num(kc), w);
+        out << QStringLiteral("C%1_q %2 0 1e-6").arg(name, nq);
+        out << QStringLiteral("R%1_q %2 0 1e15").arg(name, nq);
+        const QString p0 = QStringLiteral("(%1/(%2*tanh(%3/%4)))").arg(qq, num(q * A * l), w, num(2 * l));
+        out << QStringLiteral("B%1_ae %2 %3 V=%4*%5*ln(1+%6*(%6+%7)/%8)").arg(name, c, a, sg, num(vth), p0, num(nb), num(ni * ni));
+    }
+    // Holes collected at the emitter, and the conductivity-modulated base resistance.
+    out << QStringLiteral("B%1_hole %2 %3 I=%4*(%5/%6+%7*%8/(%9*%9))").arg(name, d, e, sg, imos, num(b), num(4 * dp), qs, w);
+    out << QStringLiteral("B%1_rb %2 %3 I=V(%2,%3)*%4*(%5*%6+%7*%8/(%4*%9))/%9")
+               .arg(name, a, d, num(q * A), num(mp["mun"]), num(nb), num(mp["mun"] + mp["mup"]), qq, w);
+    // Capacitances. Nonlinear ones are charge-based: a behavioral source gives Q(V) (in nC) as a
+    // voltage, a linear 1nF capacitor turns its rate of change into a current sensed by a 0V
+    // source, and a current-controlled source injects it between the device nodes. ngspice's own
+    // integrator handles the dynamics (behavioral ddt() is unstable when it dominates a node).
+    out << QStringLiteral("C%1_gs %2 %3 %4").arg(name, g, e, num(mp["cgs"] * A));
+    auto chargeCap = [&](const QString &tag, int idx, const QString &n1, const QString &n2, const QString &qexpr,
+                         const QString &polarity) {
+        const QString qx = internalNode(t[0], idx), qy = internalNode(t[0], idx + 1);
+        out << QStringLiteral("B%1_%2q %3 0 V=1e9*(%4)").arg(name, tag, qx, qexpr);
+        out << QStringLiteral("C%1_%2 %3 %4 1e-9").arg(name, tag, qx, qy);
+        out << QStringLiteral("V%1_%2 %3 0 0").arg(name, tag, qy);
+        out << QStringLiteral("F%1_%2 %3 %4 V%1_%2 %5").arg(name, tag, n1, n2, polarity);
+    };
+    // Gate-drain: oxide (Coxd*Agd) when accumulated (Vdg < -Vtd), otherwise in series with the
+    // depletion capacitance K/sqrt(Vdg+Vtd): Q = 2K*(s - a*ln(1+s/a)), s = sqrt(Vdg+Vtd), a = K/Cox.
+    const double coxd = mp["coxd"] * agd, kgd = eps * agd / kdep, agdRatio = kgd / std::max(coxd, 1e-30);
+    const QString vdg = QStringLiteral("(%1*V(%2,%3))").arg(sg, d, g);
+    const QString ugd = QStringLiteral("(%1+%2)").arg(vdg, num(mp["vtd"]));
+    const QString sgd = QStringLiteral("sqrt(max(%1,0)+1e-12)").arg(ugd);
+    chargeCap(QStringLiteral("gd"), 90, d, g,
+              QStringLiteral("%1*min(%2,0)+%3*(%4-%5*ln(1+%4/%5))").arg(num(coxd), ugd, num(2 * kgd), sgd, num(agdRatio)), sg);
+    // Drain-source (base-collector junction) depletion: Q = 2*K*sqrt(Vds+0.6).
+    const QString qdep = QStringLiteral("(%1*sqrt(%2+0.01))").arg(num(2 * eps * std::max(A - agd, 0.0) / kdep), pos(vds + QStringLiteral("+0.6")));
+    chargeCap(QStringLiteral("ds"), 92, d, e, qdep, sg);
+    // Collector-emitter redistribution (Ccer = Q*Cbcj/(3*QB), QB = q*A*W*NB): stored base charge
+    // swept out as the depletion layer widens, which sets the voltage rise rate at turn-off.
+    chargeCap(QStringLiteral("cer"), 94, d, e, QStringLiteral("%1/(3*%2*%3)*%4").arg(qq, num(q * A * nb), w, qdep), sg);
+    m_res.warnings << QStringLiteral("%1: IGBT simulated with a Hefner-equation behavioral model (static curves match LTspice's closely; "
+                                     "switching transients are approximate)").arg(t[0]);
     return out;
 }

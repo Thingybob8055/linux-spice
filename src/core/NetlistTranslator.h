@@ -67,6 +67,7 @@ private:
     static QStringList floatingNodeShunts(const QStringList &elements);
     QStringList translateSwitch(const QStringList &t);
     QStringList translateIdealDiode(const QStringList &t, const QString &modelLine);
+    QStringList translateIgbt(const QStringList &t, const QString &modelLine, bool pChannel);
     QStringList laplaceSource(const QString &name, QChar kind, const QString &n1, const QString &n2, const QString &input, const QString &line);
     QString translateModel(const QString &line);
     QString translateAnalysis(const QString &line);

@@ -364,21 +364,32 @@ bool write(const QString &path, const Dataset &ds, bool binary, QString *error)
     for (int v = 0; v < ds.vars.size(); ++v)
         hdr += "\t" + QByteArray::number(v) + "\t" + ds.vars[v].name.toUtf8() + "\t" + ds.vars[v].type.toUtf8() + "\n";
     hdr += binary ? "Binary:\n" : "Values:\n";
-    f.write(hdr);
+    if (binary) {
+        // LTspice's binary layout: UTF-16LE header, scale as double, other real vectors as float32.
+        const QString h = QString::fromUtf8(hdr);
+        f.write(reinterpret_cast<const char *>(h.utf16()), h.size() * 2);
+    } else {
+        f.write(hdr);
+    }
     int index = 0;
     for (int r = 0; r < ds.runs.size(); ++r) {
         const Dataset::Run &run = ds.runs[r];
         const int n = ds.pointCount(r);
         QByteArray buf;
         if (binary) {
-            buf.reserve(qsizetype(n) * ds.vars.size() * (ds.complex ? 16 : 8));
+            buf.reserve(qsizetype(n) * ds.vars.size() * (ds.complex ? 16 : 4) + 4);
             for (int p = 0; p < n; ++p) {
                 for (int v = 0; v < ds.vars.size(); ++v) {
                     double re = run.re[v][p];
-                    buf.append(reinterpret_cast<const char *>(&re), 8);
                     if (ds.complex) {
                         double im = run.im.isEmpty() ? 0.0 : run.im[v][p];
+                        buf.append(reinterpret_cast<const char *>(&re), 8);
                         buf.append(reinterpret_cast<const char *>(&im), 8);
+                    } else if (v == 0) {
+                        buf.append(reinterpret_cast<const char *>(&re), 8);
+                    } else {
+                        const float f32 = float(re);
+                        buf.append(reinterpret_cast<const char *>(&f32), 4);
                     }
                 }
             }
