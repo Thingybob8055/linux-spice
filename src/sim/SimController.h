@@ -86,6 +86,7 @@ private:
     QString m_preLog; // warnings collected before launching
     QElapsedTimer m_timer;
     int m_maxParallel = 1;
+    quint32 m_seedBase = 1; // .options seed=N (LTspice); runs are reproducible
 };
 
 // Writes a mono 16-bit PCM WAV file from a waveform (.wave directive support).

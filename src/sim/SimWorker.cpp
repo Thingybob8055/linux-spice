@@ -281,8 +281,11 @@ int runSimWorker(int argc, char **argv)
     command("set filetype=binary");
     command("set noaskquit");
     command("set nomoremode");
-    if (!seed.empty())
+    if (!seed.empty()) {
+        // "setseed" re-seeds the generator; setting the variable alone only takes effect at startup.
         command(("set rndseed=" + seed).c_str());
+        command(("setseed " + seed).c_str());
+    }
 
     // Read the netlist and hand it to ngspice line by line.
     std::ifstream in(netlistPath, std::ios::binary);

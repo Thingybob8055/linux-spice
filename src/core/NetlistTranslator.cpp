@@ -1479,6 +1479,14 @@ QStringList NetlistTranslator::translateSource(const QStringList &t)
                     args = args.mid(0, 6);
                 }
                 func = QStringLiteral("SIN(%1)").arg(args.join(' '));
+                // ngspice's step control only watches reactive elements, so a sine driving a
+                // resistive network would be sampled at the maximum step; resolve its period.
+                g_params = &m_res.params;
+                const double freq = args.size() > 2 ? numberOr(args[2], 0) : 0;
+                if (freq > 0) {
+                    const double limit = 1.0 / (20 * freq);
+                    m_deviceMaxStep = m_deviceMaxStep > 0 ? std::min(m_deviceMaxStep, limit) : limit;
+                }
             } else if (fn == QLatin1String("pulse")) {
                 // A zero rise or fall time is 10% of min(Ton, Tperiod-Ton) in LTspice (measured);
                 // ngspice would substitute its timestep. A zero width really means (almost) zero.
@@ -2549,10 +2557,14 @@ QString NetlistTranslator::translateAnalysis(const QString &line)
         }
         if (tmax <= 0 && m_tranMaxStep > 0)
             tmax = m_tranMaxStep;
-        if (m_deviceMaxStep > 0 && (tmax <= 0 || m_deviceMaxStep < tmax))
-            tmax = m_deviceMaxStep;
         if (tstep <= 0)
             tstep = (tstop - tstart) / 1000.0;
+        // Device limits only ever tighten the step: ngspice's own default is min(tstep, span/50).
+        if (m_deviceMaxStep > 0) {
+            const double effective = tmax > 0 ? tmax : std::min(tstep, (tstop - tstart) / 50.0);
+            if (m_deviceMaxStep < effective)
+                tmax = m_deviceMaxStep;
+        }
         QString out = QStringLiteral(".tran %1 %2").arg(tstep, 0, 'g', 12).arg(tstop, 0, 'g', 12);
         if (tstart > 0 || tmax > 0)
             out += QStringLiteral(" %1").arg(tstart, 0, 'g', 12);

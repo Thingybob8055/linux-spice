@@ -58,6 +58,11 @@ void SimController::start(const QStringList &ltNetlist, const QString &baseDir, 
     m_baseDir = baseDir;
     m_ltNetlist = ltNetlist;
     m_preLog.clear();
+    m_seedBase = 1;
+    static const QRegularExpression seedRe(QStringLiteral("^\\.opt\\w*\\b.*\\bseed\\s*=\\s*(\\d+)"), QRegularExpression::CaseInsensitiveOption);
+    for (const QString &l : ltNetlist)
+        if (const auto m = seedRe.match(l.trimmed()); m.hasMatch())
+            m_seedBase = m.captured(1).toUInt() + 1;
     m_timer.start();
     m_tmp = std::make_unique<QTemporaryDir>(QDir::tempPath() + QStringLiteral("/linspice-XXXXXX"));
 
@@ -158,8 +163,9 @@ void SimController::launchNext()
         connect(p, &QProcess::finished, this, [this, idx](int code, QProcess::ExitStatus st) {
             onFinished(m_jobs[idx], st == QProcess::CrashExit ? 139 : code);
         });
-        // Each run gets its own random seed so Monte Carlo steps differ.
-        const quint32 seed = QRandomGenerator::global()->bounded(1u, 2000000000u);
+        // Each run gets its own random seed so Monte Carlo steps differ, derived from the step
+        // index so that re-running the same schematic gives the same results (as in LTspice).
+        const quint32 seed = m_seedBase * 7919u + quint32(j.index) * 104729u + 1u;
         p->start(workerProgram(), {QStringLiteral("--sim-worker"), j.netlistPath, j.rawPath, QStringLiteral("--seed"), QString::number(seed)});
         if (m_paused)
             ::kill(pid_t(p->processId()), SIGSTOP);
