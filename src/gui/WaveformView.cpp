@@ -114,7 +114,7 @@ void WaveformView::setDataset(DatasetPtr ds, const QString &rawPath, const QStri
     m_rawPath = rawPath;
     m_title = title;
     ensureStepVisibility();
-    xAxis.log = ds && (ds->kind == Dataset::Kind::AC || ds->kind == Dataset::Kind::Noise || ds->logScaleX);
+    xAxis.log = ds && !ds->linearX && (ds->kind == Dataset::Kind::AC || ds->kind == Dataset::Kind::Noise || ds->logScaleX);
     if (ds && ds->kind == Dataset::Kind::FFT)
         xAxis.log = true;
     xAxis.autoRange = true;
@@ -129,7 +129,7 @@ void WaveformView::updateDataset(DatasetPtr ds)
     m_data = ds;
     ensureStepVisibility();
     if (kindChanged) {
-        xAxis.log = ds && (ds->kind == Dataset::Kind::AC || ds->kind == Dataset::Kind::Noise || ds->logScaleX);
+        xAxis.log = ds && !ds->linearX && (ds->kind == Dataset::Kind::AC || ds->kind == Dataset::Kind::Noise || ds->logScaleX);
         xAxis.autoRange = true;
         // Different analysis: traces may not make sense any more.
         for (WaveformPane *p : m_panes)

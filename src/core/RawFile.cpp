@@ -27,18 +27,22 @@ QString Dataset::unitForType(const QString &type)
         return QStringLiteral("s");
     if (t == QLatin1String("frequency"))
         return QStringLiteral("Hz");
-    if (t == QLatin1String("voltage"))
-        return QStringLiteral("V");
-    if (t == QLatin1String("current"))
-        return QStringLiteral("A");
-    if (t == QLatin1String("power"))
-        return QStringLiteral("W");
-    if (t == QLatin1String("temp-sweep") || t == QLatin1String("temperature"))
-        return QStringLiteral("°C");
     if (t.contains(QLatin1String("noise")) && t.contains(QLatin1String("voltage")))
         return QStringLiteral("V/√Hz");
     if (t.contains(QLatin1String("noise")) && t.contains(QLatin1String("current")))
         return QStringLiteral("A/√Hz");
+    if (t == QLatin1String("voltage"))
+        return QStringLiteral("V");
+    if (t == QLatin1String("current") || t == QLatin1String("device_current") || t == QLatin1String("subckt_current"))
+        return QStringLiteral("A");
+    if (t == QLatin1String("power"))
+        return QStringLiteral("W");
+    if (t == QLatin1String("impedance"))
+        return QStringLiteral("Ω");
+    if (t == QLatin1String("conductance") || t == QLatin1String("admittance"))
+        return QStringLiteral("S");
+    if (t == QLatin1String("temp-sweep") || t == QLatin1String("temperature"))
+        return QStringLiteral("°C");
     return QString();
 }
 
@@ -212,6 +216,7 @@ QList<DatasetPtr> read(const QString &path, QString *error)
         // Some writers put the first variable on the "Variables:" line itself.
         ds->complex = flags.contains(QLatin1String("complex"));
         ds->logScaleX = flags.contains(QLatin1String("log"));
+        ds->linearX = flags.contains(QLatin1String("linear"));
         const bool allDouble = flags.contains(QLatin1String("double")) || !hr.utf16; // ngspice always writes doubles
         const bool fastAccess = flags.contains(QLatin1String("fastaccess"));
         ds->kind = kindFromPlotName(ds->plotName);
@@ -347,7 +352,9 @@ bool write(const QString &path, const Dataset &ds, bool binary, QString *error)
     hdr += "Date: " + ds.date.toUtf8() + "\n";
     hdr += "Plotname: " + ds.plotName.toUtf8() + "\n";
     QByteArray flags = ds.complex ? "complex" : "real";
-    if (ds.logScaleX || ds.kind == Dataset::Kind::AC)
+    if (ds.linearX)
+        flags += " forward linear";
+    else if (ds.logScaleX || ds.kind == Dataset::Kind::AC)
         flags += " forward log";
     if (ds.runs.size() > 1)
         flags += " stepped";

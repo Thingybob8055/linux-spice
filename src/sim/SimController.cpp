@@ -132,6 +132,41 @@ void SimController::start(const QStringList &ltNetlist, const QString &baseDir, 
         m_jobs << job;
         m_stepLabels << (plan.isEmpty() ? QString() : plan.runLabel(r));
     }
+    m_mainRuns = int(m_jobs.size());
+    m_netSpecs.clear();
+    if (!m_translations.isEmpty() && m_translations[0].analysis == QLatin1String("ac")) {
+        for (int r = 0; r < runs; ++r) {
+            const QStringList lines = plan.isEmpty() ? ltNetlist : plan.apply(ltNetlist, r);
+            QStringList errs;
+            const QList<netparams::Spec> specs = netparams::parse(lines, &errs);
+            if (r == 0)
+                for (const QString &e : errs)
+                    m_preLog += QStringLiteral("Warning: %1\n").arg(e);
+            m_netSpecs << specs;
+            for (int sp = 0; sp < specs.size(); ++sp) {
+                for (int port = 1; port <= 2; ++port) {
+                    NetlistTranslator tr;
+                    const TranslationResult res = tr.translate(netparams::excitationNetlist(lines, specs[sp], port), opts);
+                    if (!res.errors.isEmpty())
+                        continue;
+                    Job job;
+                    job.index = int(m_jobs.size());
+                    job.netStep = r;
+                    job.netSpec = sp;
+                    job.netPort = port;
+                    job.netlistPath = m_tmp->filePath(QStringLiteral("net%1_%2_%3.cir").arg(r).arg(sp).arg(port));
+                    job.rawPath = m_tmp->filePath(QStringLiteral("net%1_%2_%3.raw").arg(r).arg(sp).arg(port));
+                    QFile f(job.netlistPath);
+                    if (!f.open(QIODevice::WriteOnly))
+                        continue;
+                    f.write(res.netlist.toUtf8());
+                    f.close();
+                    m_translations << res;
+                    m_jobs << job;
+                }
+            }
+        }
+    }
     if (!m_preLog.isEmpty())
         emit logText(m_preLog);
 
@@ -440,16 +475,16 @@ void SimController::assemble()
 
     DatasetPtr merged;
     QList<int> varMap; // merged var index -> run var index (per run computed)
-    for (int i = 0; i < m_jobs.size(); ++i) {
+    for (int i = 0; i < m_mainRuns; ++i) {
         Job &job = m_jobs[i];
-        if (m_jobs.size() > 1 && !job.log.isEmpty())
+        if (m_mainRuns > 1 && !job.log.isEmpty())
             log += QStringLiteral("\n--- step %1: %2 ---\n").arg(i + 1).arg(m_stepLabels.value(i));
-        if (m_jobs.size() == 1 || job.exitCode != 0)
+        if (m_mainRuns == 1 || job.exitCode != 0)
             log += job.log;
         if (!QFileInfo::exists(job.rawPath)) {
             if (job.exitCode != -2)
                 result.errors << QStringLiteral("Simulation%1 failed (exit code %2)")
-                                     .arg(m_jobs.size() > 1 ? QStringLiteral(" of step %1").arg(i + 1) : QString())
+                                     .arg(m_mainRuns > 1 ? QStringLiteral(" of step %1").arg(i + 1) : QString())
                                      .arg(job.exitCode);
             continue;
         }
@@ -483,6 +518,9 @@ void SimController::assemble()
         renamed.kind = main->kind;
         renamed.complex = main->complex;
         renamed.logScaleX = main->logScaleX;
+        // ".ac lin ..." / ".noise ... lin ...": a linear frequency axis.
+        static const QRegularExpression linRe(QStringLiteral("^\\.(ac|noise)\\b.*\\blin\\b"), QRegularExpression::CaseInsensitiveOption);
+        renamed.linearX = main->linearX || linRe.match(tr.analysisLine.trimmed()).hasMatch();
         QList<int> keep;
         for (int v = 0; v < main->vars.size(); ++v) {
             const QString n = v == 0 ? ltName(main->vars[0].name, tr) : ltName(main->vars[v].name, tr);
@@ -531,6 +569,77 @@ void SimController::assemble()
         merged->title = QFileInfo(m_outputBase).fileName();
         merged->date = QDateTime::currentDateTime().toString();
         result.data = merged;
+        // .net: two-port parameters from the excitation runs, added to each step's AC data.
+        if (!m_netSpecs.isEmpty() && merged->kind == Dataset::Kind::AC) {
+            auto portVoltages = [&](const Job &job, const netparams::Spec &spec, QVector<std::complex<double>> *v1,
+                                    QVector<std::complex<double>> *v2) {
+                QString err;
+                const QList<DatasetPtr> plots = rawfile::read(job.rawPath, &err);
+                const TranslationResult &tr = m_translations[job.index];
+                DatasetPtr main = pickPlot(plots, tr.analysis);
+                if (!main)
+                    return false;
+                Dataset named = *main;
+                for (int v = 0; v < named.vars.size(); ++v)
+                    if (const QString n = ltName(main->vars[v].name, tr); !n.isEmpty())
+                        named.vars[v].name = n;
+                named.rebuildIndex();
+                DatasetContext ctx(named, 0);
+                const QStringList sig = netparams::measuredSignals(spec);
+                QVector<std::complex<double>> *outs[] = {v1, v2};
+                for (int k = 0; k < 2; ++k) {
+                    Expression e(sig[k]);
+                    const auto val = e.evaluate(ctx);
+                    if (!val)
+                        return false;
+                    outs[k]->clear();
+                    for (int p = 0; p < val->size(); ++p)
+                        *outs[k] << val->c(p);
+                }
+                return true;
+            };
+            bool namesAdded = false;
+            for (int r = 0; r < merged->runs.size() && r < m_netSpecs.size(); ++r) {
+                for (int sp = 0; sp < m_netSpecs[r].size(); ++sp) {
+                    const netparams::Spec &spec = m_netSpecs[r][sp];
+                    const Job *ja = nullptr, *jb = nullptr;
+                    for (const Job &j : m_jobs)
+                        if (j.netStep == r && j.netSpec == sp)
+                            (j.netPort == 1 ? ja : jb) = &j;
+                    QVector<std::complex<double>> a1, a2, b1, b2;
+                    if (!ja || !jb || !portVoltages(*ja, spec, &a1, &a2) || !portVoltages(*jb, spec, &b1, &b2)) {
+                        log += QStringLiteral("Warning: .net parameters for %1 could not be computed\n").arg(spec.source);
+                        continue;
+                    }
+                    const netparams::Result nr = netparams::compute(spec, netparams::portData(spec, 1, a1, a2), netparams::portData(spec, 2, b1, b2));
+                    const int npts = merged->runs[r].re.isEmpty() ? 0 : merged->runs[r].re[0].size();
+                    for (int k = 0; k < nr.names.size(); ++k) {
+                        int idx = -1;
+                        for (int v = 0; v < merged->vars.size(); ++v)
+                            if (merged->vars[v].name.compare(nr.names[k], Qt::CaseInsensitive) == 0)
+                                idx = v;
+                        if (idx < 0) {
+                            merged->vars.append({nr.names[k], nr.types[k]});
+                            idx = int(merged->vars.size()) - 1;
+                            for (auto &run : merged->runs) {
+                                run.re << QVector<double>(npts, qQNaN());
+                                run.im << QVector<double>(npts, 0.0);
+                            }
+                            namesAdded = true;
+                        }
+                        QVector<double> re(npts, qQNaN()), im(npts, 0.0);
+                        for (int p = 0; p < npts && p < nr.values[k].size(); ++p) {
+                            re[p] = nr.values[k][p].real();
+                            im[p] = nr.values[k][p].imag();
+                        }
+                        merged->runs[r].re[idx] = re;
+                        merged->runs[r].im[idx] = im;
+                    }
+                }
+            }
+            if (namesAdded)
+                merged->rebuildIndex();
+        }
         // .meas evaluation in post-processing, per step.
         const TranslationResult &tr0 = m_translations[0];
         if (!tr0.measStatements.isEmpty()) {

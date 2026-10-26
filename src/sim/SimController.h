@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/NetParams.h"
 #include "core/NetlistTranslator.h"
 #include "core/RawFile.h"
 
@@ -69,6 +70,10 @@ private:
         int exitCode = -1;
         QString log;
         QString lineBuffer;
+        // .net excitation runs (not part of the stepped results)
+        int netStep = -1;
+        int netSpec = -1;
+        int netPort = 0;
     };
 
     void launchNext();
@@ -91,6 +96,8 @@ private:
     QElapsedTimer m_timer;
     int m_maxParallel = 1;
     quint32 m_seedBase = 1; // .options seed=N (LTspice); runs are reproducible
+    int m_mainRuns = 0;     // jobs [0, m_mainRuns) are the (stepped) analysis; the rest are .net excitations
+    QList<QList<netparams::Spec>> m_netSpecs; // per step
 };
 
 // Writes a mono 16-bit PCM WAV file from a waveform (.wave directive support).

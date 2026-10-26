@@ -818,7 +818,9 @@ void NetlistTranslator::processLines(const QStringList &lines, int depth)
             m_res.analysis = QStringLiteral("tran");
             m_res.analysisLine = t;
             m_res.fra = true;
-        } else if (kw == QLatin1String(".net") || kw == QLatin1String(".machine")
+        } else if (kw == QLatin1String(".net")) {
+            // Two-port parameters: computed from extra AC runs by the simulation controller.
+        } else if (kw == QLatin1String(".machine")
                    || kw == QLatin1String(".savebias") || kw == QLatin1String(".loadbias") || kw == QLatin1String(".savestate")
                    || kw == QLatin1String(".loadstate") || kw == QLatin1String(".mc")) {
             m_res.warnings << QStringLiteral("%1 is not supported by the ngspice engine and was ignored").arg(tok[0]);

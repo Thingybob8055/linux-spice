@@ -32,6 +32,7 @@ public:
     Kind kind = Kind::Unknown;
     bool complex = false;
     bool logScaleX = false;
+    bool linearX = false; // "linear" flag: a linear frequency sweep (AC/noise default to a log axis)
     QList<Variable> vars;
     QList<Run> runs;
     QString sourceFile;

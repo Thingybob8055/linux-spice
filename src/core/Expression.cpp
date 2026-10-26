@@ -39,6 +39,8 @@ Unit Unit::fromSymbol(const QString &sym)
     if (s == QLatin1String("s")) return second();
     if (s == QLatin1String("Hz")) return hertz();
     if (s == QLatin1String("W")) return {1, 1, 0, true};
+    if (s == QStringLiteral("Ω")) return {1, -1, 0, true};
+    if (s == QLatin1String("S")) return {-1, 1, 0, true};
     if (s.isEmpty()) return none();
     return unknown();
 }
@@ -1031,7 +1033,11 @@ bool isSignalFunction(const QString &ident)
                                       QStringLiteral("ib"), QStringLiteral("ie"), QStringLiteral("id"), QStringLiteral("ig"),
                                       QStringLiteral("is"), QStringLiteral("ip"), QStringLiteral("vm"), QStringLiteral("vdb"),
                                       QStringLiteral("vp"), QStringLiteral("vr"), QStringLiteral("vi")};
-    return names.contains(ident.toLower());
+    if (names.contains(ident.toLower()))
+        return true;
+    // .net two-port results: S11(V1) ... H22(V1), Zin/Zout/Yin/Yout(V1).
+    static const QRegularExpression twoPort(QStringLiteral("^([szyh][12][12]|zin|zout|yin|yout)$"), QRegularExpression::CaseInsensitiveOption);
+    return twoPort.match(ident).hasMatch();
 }
 
 // ---------------------------------------------------------------- ParamContext
