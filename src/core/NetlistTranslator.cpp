@@ -1987,7 +1987,7 @@ QStringList NetlistTranslator::translateDigital(const QStringList &t)
         const QString dC = digIn(clk, QStringLiteral("c"));
         const QString dS = digIn(pre, QStringLiteral("s"));
         const QString dR = digIn(clr, QStringLiteral("r"));
-        out << QStringLiteral(".model %1_adc adc_bridge(in_low=%2 in_high=%2 rise_delay=1e-12 fall_delay=1e-12)").arg(base).arg(ref, 0, 'g', 12);
+        out << QStringLiteral(".model %1_adc adc_bridge(in_low=%2 in_high=%2 rise_delay=1e-12 fall_delay=1e-12)").arg(base).arg(ref, 0, 'g', 12); // V > Ref is high
         QString dataNode = dD;
         if (dataNode.isEmpty()) {
             dataNode = base + QStringLiteral("_dzero");
@@ -2059,6 +2059,49 @@ QStringList NetlistTranslator::translateDigital(const QStringList &t)
         const double rclamp = numberOr(p.value(QStringLiteral("rclamp")), 1.0);
         const QString vc = QStringLiteral("abs(V(%1)-V(%2))").arg(inp.isEmpty() ? com : inp, inn.isEmpty() ? com : inn);
         out << QStringLiteral("B%1_var %2 %3 I=sgn(V(%2,%3))*uramp(abs(V(%2,%3))-%4)/%5").arg(name, outN, com, vc).arg(rclamp, 0, 'g', 12);
+        return out;
+    } else if (model == QLatin1String("PHASEDET")) {
+        // Tri-state phase-frequency detector with a charge-pump output (characterized against
+        // LTspice with stepped phase offsets): a falling crossing of input 1 sets UP, of input 2
+        // sets DN, both set resets both; the output sources Iout*(UP-DN) into terminal 7,
+        // limited to [Vlow, Vhigh]. The edge polarity matters: it decides which of the two
+        // equivalent phase branches (phi or phi-360) the detector settles into from t=0.
+        const QString in1 = pin(1), in2 = pin(2);
+        if (t[7] == QLatin1String("0") || t[7].startsWith(QLatin1String("NC_"), Qt::CaseInsensitive))
+            return out;
+        const QString outN = nodeToken(t[7]);
+        const QString base = QString(name).toLower();
+        auto digIn = [&](const QString &n, const QString &tag) -> QString {
+            QString src = n.isEmpty() ? com : n;
+            if (com != QLatin1String("0")) {
+                src = internalNode(t[0], 40 + tag.size()) + tag;
+                out << QStringLiteral("B%1_r%2 %3 0 V=V(%4,%5)").arg(name, tag, src, n.isEmpty() ? com : n, com);
+            }
+            const QString dn = QStringLiteral("%1_d%2").arg(base, tag);
+            out << QStringLiteral("A%1_i%2 [%3] [%4] %5_adc").arg(name, tag, src, dn, base);
+            return dn;
+        };
+        const QString a1 = digIn(in1, QStringLiteral("a")), a2 = digIn(in2, QStringLiteral("b"));
+        const QString c1 = base + QStringLiteral("_na"), c2 = base + QStringLiteral("_nb");
+        out << QStringLiteral("A%1_na %2 %3 %4_inv").arg(name, a1, c1, base);
+        out << QStringLiteral("A%1_nb %2 %3 %4_inv").arg(name, a2, c2, base);
+        out << QStringLiteral(".model %1_inv d_inverter(rise_delay=1e-12 fall_delay=1e-12)").arg(base);
+        out << QStringLiteral(".model %1_adc adc_bridge(in_low=%2 in_high=%2 rise_delay=1e-12 fall_delay=1e-12)").arg(base).arg(ref, 0, 'g', 12); // V > Ref is high
+        out << QStringLiteral("A%1_one %2_one %2_hi").arg(name, base);
+        out << QStringLiteral(".model %1_hi d_pullup").arg(base);
+        out << QStringLiteral("A%1_up %2_one %3 NULL %2_rst %2_up %2_upb %2_ffm").arg(name, base, c1);
+        out << QStringLiteral("A%1_dn %2_one %3 NULL %2_rst %2_dn %2_dnb %2_ffm").arg(name, base, c2);
+        out << QStringLiteral(".model %1_ffm d_dff(clk_delay=1e-12 set_delay=1e-12 reset_delay=1e-12 rise_delay=1e-12 fall_delay=1e-12)").arg(base);
+        out << QStringLiteral("A%1_and [%2_up %2_dn] %2_rst %2_andm").arg(name, base);
+        out << QStringLiteral(".model %1_andm d_and(rise_delay=1e-12 fall_delay=1e-12)").arg(base);
+        const QString up = internalNode(t[0], 45), dn = internalNode(t[0], 46);
+        out << QStringLiteral("A%1_o [%2_up %2_dn] [%3 %4] %2_dac").arg(name, base, up, dn);
+        out << QStringLiteral(".model %1_dac dac_bridge(out_low=0 out_high=1 out_undef=0.5 t_rise=1e-12 t_fall=1e-12)").arg(base);
+        const double iout = numberOr(p.value(QStringLiteral("iout")), 1e-6);
+        QString clamp;
+        if (p.contains(QStringLiteral("vhigh")) || p.contains(QStringLiteral("vlow")))
+            clamp = QStringLiteral(" - 1k*(uramp(V(%1,%2)-%3) - uramp(%4-V(%1,%2)))").arg(outN, com).arg(vhigh, 0, 'g', 12).arg(vlow, 0, 'g', 12);
+        out << QStringLiteral("B%1_cp %2 %3 I=%4*(V(%5)-V(%6))%7").arg(name, com, outN).arg(iout, 0, 'g', 12).arg(up, dn, clamp);
         return out;
     } else if (model == QLatin1String("SAMPLEHOLD")) {
         // in+ in- CLK S/H . . out com. With S/H connected the output tracks V(in+,in-) while S/H is
