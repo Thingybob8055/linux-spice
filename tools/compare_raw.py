@@ -127,13 +127,19 @@ def compare(ref, test, step=0):
         else:
             span = max(max(yr) - min(yr), 1e-3 * max(1.0, max(abs(v) for v in yr)), 1e-6)
         lo, hi = max(xr[0], xt[0]), min(xr[-1], xt[-1])
+        # Sample both waveforms on a uniform grid (logarithmic for log sweeps) so errors are
+        # weighted by duration, not by either simulator's adaptive point density (LTspice stores
+        # dense points around edges, which would magnify sub-step timing differences).
         acc, n = 0.0, 0
-        for x, y in zip(xr, yr):
-            if x < lo or x > hi:
-                continue
-            d = interp(xt, yt, x) - y
-            acc += d * d
-            n += 1
+        if hi > lo and len(xr) > 1:
+            logx = ref["complex"] and lo > 0 and hi / lo > 100
+            grid = 4000
+            for g in range(grid + 1):
+                f = g / grid
+                x = lo * (hi / lo) ** f if logx else lo + (hi - lo) * f
+                d = interp(xt, yt, x) - interp(xr, yr, x)
+                acc += d * d
+                n += 1
         if n:
             results[name] = math.sqrt(acc / n) / span
     return results

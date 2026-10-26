@@ -1480,10 +1480,15 @@ QStringList NetlistTranslator::translateSource(const QStringList &t)
                 }
                 func = QStringLiteral("SIN(%1)").arg(args.join(' '));
             } else if (fn == QLatin1String("pulse")) {
-                // ngspice treats zero rise/fall/width as "use the default"; LTspice means zero.
+                // A zero rise or fall time is 10% of min(Ton, Tperiod-Ton) in LTspice (measured);
+                // ngspice would substitute its timestep. A zero width really means (almost) zero.
+                g_params = &m_res.params;
+                const double ton = args.size() > 5 ? numberOr(args[5], 0) : 0;
+                const double tper = args.size() > 6 ? numberOr(args[6], 0) : 0;
+                const double edge = ton > 0 ? 0.1 * std::min(ton, tper > ton ? tper - ton : ton) : 1e-12;
                 for (int ai = 3; ai <= 5 && ai < args.size(); ++ai)
                     if (isNumeric(args[ai]) && numberOr(args[ai], 1) == 0)
-                        args[ai] = QStringLiteral("1e-12");
+                        args[ai] = ai == 5 ? QStringLiteral("1e-12") : QString::number(edge, 'g', 12);
                 func = QStringLiteral("PULSE(%1)").arg(args.join(' '));
             } else {
                 func = QStringLiteral("%1(%2)").arg(fn.toUpper(), args.join(' '));
