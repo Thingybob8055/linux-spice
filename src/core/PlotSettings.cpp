@@ -70,7 +70,7 @@ bool PlotSettingsFile::load(const QString &path, QString *error)
             }
             continue;
         }
-        if (l == QLatin1String("}")) {
+        if (l == QLatin1String("}") || l == QLatin1String("},")) { // panes are comma-separated
             if (depth == 2)
                 pane = nullptr;
             --depth;

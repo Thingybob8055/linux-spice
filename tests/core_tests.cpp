@@ -9,6 +9,7 @@
 #include "core/Measure.h"
 #include "core/NetlistTranslator.h"
 #include "core/Netlister.h"
+#include "core/PlotSettings.h"
 #include "core/RawFile.h"
 #include "core/Schematic.h"
 #include "core/StepSweep.h"
@@ -17,8 +18,10 @@
 #include "core/TextIO.h"
 
 #include <QCoreApplication>
+#include <QDir>
 #include <QDirIterator>
 #include <QElapsedTimer>
+#include <QFile>
 #include <QFileInfo>
 #include <QRegularExpression>
 
@@ -54,6 +57,30 @@ static void testUnits()
     CHECK(units::formatEng(1500, "V") == QStringLiteral("1.5KV"));
     CHECK(units::formatSpice(1e-6) == QStringLiteral("1u"));
     CHECK(units::formatSpice(2.2e6) == QStringLiteral("2.2Meg"));
+}
+
+static void testPlotSettingsPanes()
+{
+    // LTspice separates panes with "}," (Transformer.plt from the Educational examples).
+    const QString path = QDir::temp().filePath(QStringLiteral("linspice_test.plt"));
+    QFile f(path);
+    if (!f.open(QIODevice::WriteOnly))
+        return;
+    f.write("[Transient Analysis]\n{\n   Npanes: 2\n   {\n      traces: 1 {524291,0,\"V(out)\"}\n"
+            "      Y[0]: (' ',1,-3,0.5,2)\n   },\n   {\n      traces: 1 {268959746,0,\"V(in)\"}\n"
+            "      Y[0]: (' ',1,0,0.1,1)\n   }\n}\n");
+    f.close();
+    PlotSettingsFile ps;
+    CHECK(ps.load(path));
+    CHECK(ps.sections.size() == 1);
+    if (ps.sections.size() == 1) {
+        CHECK(ps.sections[0].panes.size() == 2);
+        if (ps.sections[0].panes.size() == 2) {
+            CHECK(ps.sections[0].panes[0].traces.size() == 1 && ps.sections[0].panes[0].traces[0].expr == QStringLiteral("V(out)"));
+            CHECK(ps.sections[0].panes[1].traces.size() == 1 && ps.sections[0].panes[1].traces[0].expr == QStringLiteral("V(in)"));
+        }
+    }
+    QFile::remove(path);
 }
 
 static void testFra()
@@ -348,6 +375,7 @@ int main(int argc, char **argv)
     testUnits();
     testGeometry();
     testFra();
+    testPlotSettingsPanes();
     testExpression();
     testSchematicRoundTrip();
     testTranslator();

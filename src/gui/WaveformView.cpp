@@ -805,7 +805,7 @@ bool WaveformView::savePlotSettings(const QString &path)
         }
         ps.gridOn = gridOn;
         ps.plotPhase = p->showPhase;
-        sec.panes << ps;
+        sec.panes.prepend(ps); // LTspice lists panes from the bottom up
     }
     return file.save(path);
 }
@@ -826,7 +826,7 @@ bool WaveformView::loadPlotSettings(const QString &path)
     m_panes.first()->traces.clear();
     for (int i = 0; i < sec->panes.size(); ++i) {
         WaveformPane *pane = i == 0 ? m_panes.first() : addPane(false);
-        const PlotPaneSettings &ps = sec->panes[i];
+        const PlotPaneSettings &ps = sec->panes[sec->panes.size() - 1 - i]; // stored bottom pane first
         for (const PlotTrace &pt : ps.traces) {
             WaveTrace t;
             t.expr = pt.expr;
