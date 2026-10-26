@@ -72,6 +72,20 @@ set(GUI_SOURCES
 add_library(linspice_gui STATIC ${SIM_SOURCES} ${GUI_SOURCES})
 target_link_libraries(linspice_gui PUBLIC linspice_core Qt6::Widgets Qt6::Svg Qt6::PrintSupport Qt6::Concurrent ${CMAKE_DL_LIBS})
 target_include_directories(linspice_gui PUBLIC src)
+# Remember where libngspice was found at build time, so the app works without
+# LINSPICE_NGSPICE_LIB or a system-wide install (e.g. on NixOS outside nix-shell).
+find_library(NGSPICE_LIBRARY NAMES ngspice
+    HINTS $ENV{LINSPICE_NGSPICE_LIB}/.. ENV LD_LIBRARY_PATH ENV NIX_LDFLAGS)
+if(NOT NGSPICE_LIBRARY AND DEFINED ENV{LINSPICE_NGSPICE_LIB})
+    set(NGSPICE_LIBRARY "$ENV{LINSPICE_NGSPICE_LIB}")
+endif()
+if(NGSPICE_LIBRARY)
+    get_filename_component(NGSPICE_LIBRARY_REAL "${NGSPICE_LIBRARY}" REALPATH)
+    message(STATUS "libngspice: ${NGSPICE_LIBRARY_REAL}")
+    target_compile_definitions(linspice_gui PRIVATE LINSPICE_NGSPICE_BUILD_PATH="${NGSPICE_LIBRARY_REAL}")
+else()
+    message(WARNING "libngspice not found; set LINSPICE_NGSPICE_LIB at run time")
+endif()
 
 add_executable(linspice src/main.cpp)
 target_compile_definitions(linspice PRIVATE LINSPICE_VERSION="${PROJECT_VERSION}")

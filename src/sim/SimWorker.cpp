@@ -195,11 +195,15 @@ void *openNgspice(std::string *err)
     std::vector<std::string> candidates;
     if (const char *env = std::getenv("LINSPICE_NGSPICE_LIB"))
         candidates.emplace_back(env);
+#ifdef LINSPICE_NGSPICE_BUILD_PATH
+    candidates.emplace_back(LINSPICE_NGSPICE_BUILD_PATH); // found when LinSpice was built
+#endif
     candidates.emplace_back("libngspice.so.0");
     candidates.emplace_back("libngspice.so");
     candidates.emplace_back("/usr/lib/libngspice.so.0");
     candidates.emplace_back("/usr/lib/x86_64-linux-gnu/libngspice.so.0");
     candidates.emplace_back("/usr/local/lib/libngspice.so.0");
+    candidates.emplace_back("/run/current-system/sw/lib/libngspice.so.0"); // NixOS system profile
     std::string errors;
     for (const auto &c : candidates) {
         if (c.empty())

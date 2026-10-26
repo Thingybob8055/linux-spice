@@ -19,7 +19,7 @@ cmake --build build
 sudo cmake --install build      # optional: binary, desktop entry, icon, MIME types
 ```
 
-With Nix, `nix-shell shell.nix` provides every dependency (and sets `LINSPICE_NGSPICE_LIB`).
+With Nix, `nix-shell shell.nix` provides every dependency. The build records where it found libngspice, so the resulting binary also runs outside the shell (as long as that store path isn't garbage-collected); otherwise set `LINSPICE_NGSPICE_LIB` or the path in **Tools ▸ Settings**.
 
 ## First run
 
