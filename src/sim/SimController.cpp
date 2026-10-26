@@ -1,6 +1,7 @@
 #include "SimController.h"
 
 #include "core/AppSettings.h"
+#include "core/Expression.h"
 #include "core/Measure.h"
 #include "core/StepSweep.h"
 #include "core/TextIO.h"
@@ -561,6 +562,79 @@ void SimController::assemble()
             if (!measLog.isEmpty()) {
                 log += QStringLiteral("\n") + measLog + QStringLiteral("\n");
                 result.measLines = measLog.split('\n');
+            }
+        }
+        // .fra: extract the frequency response from the transient data.
+        if (tr0.fra && merged->kind == Dataset::Kind::Transient) {
+            for (const fra::Analyzer &a : tr0.fraAnalyzers) {
+                if (!a.enabled)
+                    continue;
+                // Probes pair with analyzers by instance name; with one analyzer all probes belong to it.
+                QList<fra::Probe> probes;
+                for (const fra::Probe &p : tr0.fraProbes)
+                    if (tr0.fraAnalyzers.size() == 1 || p.name.compare(a.name, Qt::CaseInsensitive) == 0)
+                        probes << p;
+                auto ds = DatasetPtr::create();
+                ds->kind = Dataset::Kind::AC;
+                ds->complex = true;
+                ds->logScaleX = true;
+                ds->plotName = QStringLiteral("Frequency Response Analysis");
+                ds->title = merged->title;
+                ds->date = merged->date;
+                for (int r = 0; r < merged->runs.size(); ++r) {
+                    DatasetContext ctx(*merged, r);
+                    const fra::Result fr = fra::analyze(a, probes, merged->runs[r].re[0], [&ctx](const QString &expr) {
+                        Expression e(expr);
+                        const auto v = e.evaluate(ctx);
+                        return v ? v->re : QVector<double>();
+                    });
+                    if (fr.freq.isEmpty())
+                        continue;
+                    if (ds->vars.isEmpty()) {
+                        ds->vars = {{QStringLiteral("frequency"), QStringLiteral("frequency")},
+                                    a.impedance ? Dataset::Variable{QStringLiteral("impedance_%1").arg(a.name), QStringLiteral("impedance")}
+                                                : Dataset::Variable{QStringLiteral("gain_%1").arg(a.name), QStringLiteral("gain")},
+                                    a.impedance ? Dataset::Variable{QStringLiteral("I(stimulus_%1)").arg(a.name), QStringLiteral("current")}
+                                                : Dataset::Variable{QStringLiteral("V(stimulus_%1)").arg(a.name), QStringLiteral("voltage")}};
+                        for (const auto &x : fr.extra)
+                            ds->vars.append({x.first, QStringLiteral("gain")});
+                    }
+                    Dataset::Run run;
+                    run.label = m_stepLabels.value(r);
+                    run.re.resize(ds->vars.size());
+                    run.im.resize(ds->vars.size());
+                    for (int k = 0; k < fr.freq.size(); ++k) {
+                        auto put = [&](int v, std::complex<double> c) {
+                            run.re[v] << c.real();
+                            run.im[v] << c.imag();
+                        };
+                        put(0, fr.freq[k]);
+                        put(1, fr.gain[k]);
+                        put(2, fr.stimulus[k]);
+                        for (int x = 0; x < fr.extra.size(); ++x)
+                            put(3 + x, fr.extra[x].second.value(k));
+                    }
+                    ds->runs << run;
+                    if (!fr.summary.isEmpty())
+                        log += (merged->runs.size() > 1 ? QStringLiteral("%1: ").arg(run.label) : QString()) + fr.summary + '\n';
+                }
+                if (ds->runs.isEmpty())
+                    continue;
+                ds->rebuildIndex();
+                if (!m_outputBase.isEmpty()) {
+                    QString werr;
+                    rawfile::write(m_outputBase + QStringLiteral(".fra_%1.raw").arg(a.name), *ds, true, &werr);
+                }
+                result.fraData << ds;
+                // LTspice plots the gain when neither terminal is grounded and there are no probes,
+                // or the probe when one terminal is grounded and there is exactly one probe.
+                const bool grounded = a.in == QLatin1String("0") || a.out == QLatin1String("0");
+                QString autoPlot;
+                if (!grounded && probes.isEmpty())
+                    autoPlot = ds->vars.value(1).name;
+                else if (grounded && probes.size() == 1)
+                    autoPlot = QStringLiteral("probe_%1").arg(probes[0].name);
+                result.fraAutoPlot << autoPlot;
             }
         }
         // .wave output

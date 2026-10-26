@@ -1421,6 +1421,26 @@ void MainWindow::simulationFinished(DocumentWidget *source, const SimResult &r)
     } else {
         w->updateDataset(r.data);
     }
+    // .fra: a Bode plot per analyzer, with LTspice's automatic trace when there is one.
+    for (int i = 0; i < r.fraData.size(); ++i) {
+        const DatasetPtr &ds = r.fraData[i];
+        WaveformView *fv = s.fraViews.value(i);
+        const QString title = QFileInfo(r.rawPath.isEmpty() ? source->displayName() : r.rawPath).completeBaseName()
+            + QStringLiteral(".fra_%1.raw").arg(ds->vars.value(1).name.section('_', 1));
+        if (!fv) {
+            fv = new WaveformView;
+            fv->setDataset(ds, QString(), title);
+            const QString trace = r.fraAutoPlot.value(i);
+            if (!trace.isEmpty())
+                fv->addTrace(trace);
+            addDocument(fv)->showMaximized();
+            while (s.fraViews.size() <= i)
+                s.fraViews << QPointer<WaveformView>();
+            s.fraViews[i] = fv;
+        } else {
+            fv->updateDataset(ds);
+        }
+    }
     if (!r.measLines.isEmpty())
         statusBar()->showMessage(tr(".meas results are in the SPICE Output Log (Ctrl+L)"), 5000);
     updateActions();

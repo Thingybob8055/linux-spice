@@ -5,6 +5,7 @@
 
 #include "core/AppSettings.h"
 #include "core/Expression.h"
+#include "core/Fra.h"
 #include "core/Measure.h"
 #include "core/NetlistTranslator.h"
 #include "core/Netlister.h"
@@ -53,6 +54,31 @@ static void testUnits()
     CHECK(units::formatEng(1500, "V") == QStringLiteral("1.5KV"));
     CHECK(units::formatSpice(1e-6) == QStringLiteral("1u"));
     CHECK(units::formatSpice(2.2e6) == QStringLiteral("2.2Meg"));
+}
+
+static void testFra()
+{
+    // Schedule rules observed in LTspice's FRA log for fra_eg1 (oct=4, fcoarse=10k):
+    // grid fstart*2^(k/oct), one point per octave below fcoarse, fend included, swept downwards.
+    const QStringList t = NetlistTranslator::tokenize(
+        QStringLiteral("@1 A B delay=100u fstart=100 fend=10Meg oct=4 fcoarse=10k pp0=100m pp1=10m f0=50k f1=500k tavgmin=100u tsettle=2u"));
+    QString err;
+    const auto a = fra::parseAnalyzer(t, [](const QString &v) { return units::parseSpiceNumber(v).value_or(0); }, &err);
+    CHECK(a.has_value());
+    if (!a)
+        return;
+    CHECK(near(a->segments.first().freq, 10e6));
+    CHECK(near(a->segments[1].freq, 100 * std::pow(2.0, 66 / 4.0)));
+    CHECK(near(a->segments.first().start, 100e-6));
+    CHECK(near(a->segments.first().analyzeEnd, 202e-6));    // tsettle + 1000 periods >= tavgmin
+    CHECK(near(a->segments.last().freq, 100));
+    CHECK(near(a->segments[a->segments.size() - 2].freq, 200)); // one point per octave below fcoarse
+    CHECK(near(a->segments.first().amplitude, 10e-3));       // above f1
+    CHECK(near(a->segments.last().amplitude, 100e-3));       // below f0
+    for (int i = 1; i < a->segments.size(); ++i) {
+        CHECK(a->segments[i].start == a->segments[i - 1].end);  // contiguous
+        CHECK(std::fabs(std::sin(a->segments[i].phase)) < 1e-9); // frequency changes at zero crossings
+    }
 }
 
 static void testGeometry()
@@ -321,6 +347,7 @@ int main(int argc, char **argv)
 
     testUnits();
     testGeometry();
+    testFra();
     testExpression();
     testSchematicRoundTrip();
     testTranslator();

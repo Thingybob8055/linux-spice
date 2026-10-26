@@ -25,6 +25,10 @@ struct SimResult {
     QStringList stepLabels;
     double elapsed = 0;
     QStringList measLines;
+    // .fra: one complex dataset per analyzer ("Frequency Response Analysis"), and the trace
+    // LTspice would plot automatically for it (empty: a blank Bode plot).
+    QList<DatasetPtr> fraData;
+    QStringList fraAutoPlot;
 };
 
 // Runs simulations in worker processes and assembles the results.

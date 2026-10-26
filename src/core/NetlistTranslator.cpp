@@ -518,11 +518,21 @@ TranslationResult NetlistTranslator::translate(const QStringList &ltLines, const
     for (const QString &o : m_optionLines)
         if (o.contains(QLatin1String("method="), Qt::CaseInsensitive))
             methodSet = true;
+    // FRA extracts small sinusoids from the transient: trapezoidal integration (no numerical
+    // damping, as LTspice uses) and tighter truncation-error control keep high frequencies accurate.
     if (!methodSet)
-        out << QStringLiteral(".options method=gear");
+        out << (m_res.fra ? QStringLiteral(".options method=trap") : QStringLiteral(".options method=gear"));
+    if (m_res.fra) {
+        bool trtolSet = m_opts.extraOptions.contains(QLatin1String("trtol"), Qt::CaseInsensitive);
+        for (const QString &o : m_optionLines)
+            if (o.contains(QLatin1String("trtol"), Qt::CaseInsensitive))
+                trtolSet = true;
+        if (!trtolSet)
+            out << QStringLiteral(".options trtol=1");
+    }
     if (!m_opts.extraOptions.trimmed().isEmpty())
         out << QStringLiteral(".options %1").arg(m_opts.extraOptions.trimmed());
-    if (m_deviceMaxStep > 0 && !m_analysis.isEmpty() && m_analysis.first().startsWith(QLatin1String(".tran"), Qt::CaseInsensitive)) {
+    if (!m_analysis.isEmpty() && (m_res.fra || (m_deviceMaxStep > 0 && m_analysis.first().startsWith(QLatin1String(".tran"), Qt::CaseInsensitive)))) {
         const qsizetype nw = m_res.warnings.size();
         const QString a = translateAnalysis(m_res.analysisLine);
         m_res.warnings.resize(nw);
@@ -798,7 +808,17 @@ void NetlistTranslator::processLines(const QStringList &lines, int depth)
             m_res.warnings << QStringLiteral(".save is ignored; all node voltages and device currents are saved.");
         } else if (kw == QLatin1String(".end") || kw == QLatin1String(".backanno") || kw == QLatin1String(".endl")) {
             // nothing
-        } else if (kw == QLatin1String(".net") || kw == QLatin1String(".fra") || kw == QLatin1String(".machine")
+        } else if (kw == QLatin1String(".fra")) {
+            if (!m_analysis.isEmpty()) {
+                m_res.warnings << QStringLiteral("Only one analysis is supported per run; ignoring \"%1\"").arg(t);
+                continue;
+            }
+            // A transient run; its length comes from the FRA devices' sweep (known after elements).
+            m_analysis << QString();
+            m_res.analysis = QStringLiteral("tran");
+            m_res.analysisLine = t;
+            m_res.fra = true;
+        } else if (kw == QLatin1String(".net") || kw == QLatin1String(".machine")
                    || kw == QLatin1String(".savebias") || kw == QLatin1String(".loadbias") || kw == QLatin1String(".savestate")
                    || kw == QLatin1String(".loadstate") || kw == QLatin1String(".mc")) {
             m_res.warnings << QStringLiteral("%1 is not supported by the ngspice engine and was ignored").arg(tok[0]);
@@ -1204,9 +1224,16 @@ QStringList NetlistTranslator::translateElementTokens(QStringList t, const QStri
         break; // native switch
     }
     case '@':
-    case '&':
-        m_res.warnings << QStringLiteral("Frequency response analyzer element %1 is not supported and was ignored").arg(t[0]);
+        return translateFraAnalyzer(t);
+    case '&': {
+        QString err;
+        QStringList nodes = t;
+        if (const auto probe = fra::parseProbe(nodes, &err))
+            m_res.fraProbes << *probe;
+        else
+            m_res.errors << err;
         return {};
+    }
     case 'X': {
         QStringList out;
         out << elementName(t[0]);
@@ -2580,6 +2607,41 @@ QString NetlistTranslator::translateAnalysis(const QString &line)
     g_params = &m_res.params;
     QStringList t = line.split(QRegularExpression(QStringLiteral("\\s+")), Qt::SkipEmptyParts);
     const QString kw = t[0].toLower();
+    if (kw == QLatin1String(".fra")) {
+        // .fra [Tstart=] [dTmax=] [Tstep=] [Tstop=] [uic] [startup]: a transient that ends when
+        // every FRA device has finished its sweep.
+        double tstart = 0, dtmax = 0, tstep = 0, tstop = 0;
+        QStringList flags;
+        for (int i = 1; i < t.size(); ++i) {
+            const QString lt = t[i].toLower();
+            const int eq = lt.indexOf('=');
+            if (eq > 0) {
+                const QString k = lt.left(eq);
+                const double v = numberOr(t[i].mid(eq + 1), 0);
+                if (k == QLatin1String("tstart")) tstart = v;
+                else if (k == QLatin1String("dtmax")) dtmax = v;
+                else if (k == QLatin1String("tstep")) tstep = v;
+                else if (k == QLatin1String("tstop")) tstop = v;
+            } else if (lt == QLatin1String("uic")) {
+                flags << QStringLiteral("uic");
+            } else if (lt == QLatin1String("startup")) {
+                m_startup = true;
+            }
+        }
+        if (tstop <= 0)
+            for (const fra::Analyzer &a : m_res.fraAnalyzers)
+                tstop = std::max(tstop, a.stopTime());
+        if (tstop <= 0)
+            return QStringLiteral(".tran 1e-9 1e-6"); // placeholder until the FRA devices are known
+        if (tstep <= 0)
+            tstep = (tstop - tstart) / 1000.0;
+        QString out = QStringLiteral(".tran %1 %2 %3").arg(tstep, 0, 'g', 12).arg(tstop, 0, 'g', 12).arg(tstart, 0, 'g', 12);
+        if (dtmax > 0)
+            out += QStringLiteral(" %1").arg(dtmax, 0, 'g', 12);
+        if (!flags.isEmpty())
+            out += ' ' + flags.join(' ');
+        return out;
+    }
     if (kw == QLatin1String(".tran")) {
         QStringList nums;
         QStringList flags;
@@ -3151,4 +3213,53 @@ QString NetlistTranslator::pwlFromWav(const QString &fileIn, int channel)
         pts << QStringLiteral("%1 %2").arg(double(k) / rate, 0, 'g', 12).arg(v, 0, 'g', 7);
     }
     return pts.isEmpty() ? QStringLiteral("0 0") : pts.join(' ');
+}
+
+QStringList NetlistTranslator::translateFraAnalyzer(const QStringList &t)
+{
+    // "@name in out ..." (Middlebrook voltage injection, or current injection with "zm").
+    QString err;
+    g_params = &m_res.params;
+    const auto a = fra::parseAnalyzer(t, [](const QString &v) { return numberOr(v, 0); }, &err);
+    if (!a) {
+        m_res.errors << err;
+        return {};
+    }
+    m_res.fraAnalyzers << *a;
+    const QString base = QStringLiteral("fra_") + elementName(a->name);
+    const QString in = nodeToken(a->in), out = nodeToken(a->out);
+    QStringList lines;
+    auto num = [](double v) { return QString::number(v, 'g', 15); };
+    if (a->impedance) {
+        // Current stimulus into "in" (returning through "out"), with the parallel resistance.
+        if (a->enabled)
+            lines << QStringLiteral("B%1 %2 %3 I=%4").arg(base, out, in, fra::stimulusExpression(*a));
+        lines << QStringLiteral("R%1 %2 %3 %4").arg(base, in, out, num(a->rpar));
+    } else {
+        // Series voltage source: V(in) - V(out) = stimulus, through the parallel resistance rpar.
+        const QString mid = internalNode(QStringLiteral("fra") + a->name, 1);
+        lines << QStringLiteral("B%1 %2 %3 V=%4").arg(base, in, mid, a->enabled ? fra::stimulusExpression(*a) : QStringLiteral("0"));
+        lines << QStringLiteral("R%1 %2 %3 %4").arg(base, mid, out, num(a->rpar));
+    }
+    if (a->enabled) {
+        // A unit-amplitude copy of the stimulus across a 1F capacitor: ngspice's truncation-error
+        // control then resolves every stimulus frequency, including in otherwise resistive circuits.
+        const QString lte = internalNode(QStringLiteral("fra") + a->name, 2);
+        lines << QStringLiteral("B%1_lte %2 0 V=%3").arg(base, lte, fra::stimulusExpression(*a, true));
+        lines << QStringLiteral("C%1_lte %2 0 1").arg(base, lte);
+        // Breakpoints at every segment boundary (ngspice cannot see them inside a behavioral
+        // expression): a zero-valued PWL source with corners there.
+        QStringList pts;
+        double last = -1;
+        for (const fra::Segment &sg : a->segments)
+            for (double tb : {sg.start, sg.end})
+                if (tb > last) {
+                    pts << QStringLiteral("%1 0").arg(num(tb));
+                    last = tb;
+                }
+        const QString bp = internalNode(QStringLiteral("fra") + a->name, 3);
+        lines << QStringLiteral("V%1_bp %2 0 PWL(%3)").arg(base, bp, pts.join(' '));
+        lines << QStringLiteral("R%1_bp %2 0 1").arg(base, bp);
+    }
+    return lines;
 }

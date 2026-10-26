@@ -47,6 +47,7 @@ private:
         QPointer<DocumentWidget> source; // schematic or netlist
         SimController *controller = nullptr;
         QPointer<WaveformView> wave;
+        QList<QPointer<WaveformView>> fraViews; // Bode plots of .fra analyzers
         QPointer<LogWindow> log;
         SimResult last;
         bool hasResult = false;

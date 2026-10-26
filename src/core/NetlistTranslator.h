@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Fra.h"
+
 #include <QHash>
 #include <QSet>
 #include <QString>
@@ -24,6 +26,10 @@ struct TranslationResult {
     QHash<QString, QString> params; // .param name -> expression text
     QString measComplexFormat;      // from .options meascplxfmt
     bool hasAnalysis = false;
+    // .fra: the run is a transient with these analyzers' stimuli; results are extracted afterwards.
+    bool fra = false;
+    QList<fra::Analyzer> fraAnalyzers;
+    QList<fra::Probe> fraProbes;
 };
 
 class NetlistTranslator
@@ -68,6 +74,7 @@ private:
     QStringList translateSwitch(const QStringList &t);
     QStringList translateIdealDiode(const QStringList &t, const QString &modelLine);
     QStringList translateIgbt(const QStringList &t, const QString &modelLine, bool pChannel);
+    QStringList translateFraAnalyzer(const QStringList &t);
     QStringList laplaceSource(const QString &name, QChar kind, const QString &n1, const QString &n2, const QString &input, const QString &line);
     QString translateModel(const QString &line);
     QString translateAnalysis(const QString &line);
