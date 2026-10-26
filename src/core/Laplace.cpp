@@ -40,6 +40,7 @@ Poly mul(const Poly &a, const Poly &b)
 
 struct R {
     Poly n{1.0}, d{1.0};
+    double delay = 0;
     static R constant(double c) { R r; r.n = {c}; return r; }
     bool isConstant() const { return n.size() == 1 && d.size() == 1; }
     double value() const { return n[0] / d[0]; }
@@ -50,6 +51,7 @@ R radd(const R &a, const R &b, double sign = 1.0)
     R r;
     r.n = add(mul(a.n, b.d), mul(b.n, a.d), sign);
     r.d = mul(a.d, b.d);
+    r.delay = a.delay; // callers check that delays match
     return r;
 }
 
@@ -58,6 +60,7 @@ R rmul(const R &a, const R &b)
     R r;
     r.n = mul(a.n, b.n);
     r.d = mul(a.d, b.d);
+    r.delay = a.delay + b.delay;
     return r;
 }
 
@@ -66,6 +69,7 @@ R rdiv(const R &a, const R &b)
     R r;
     r.n = mul(a.n, b.d);
     r.d = mul(a.d, b.n);
+    r.delay = a.delay - b.delay;
     return r;
 }
 
@@ -118,6 +122,10 @@ private:
             auto b = term();
             if (!b)
                 return std::nullopt;
+            if (std::fabs(a->delay - b->delay) > 1e-30) {
+                m_err = QStringLiteral("sums of terms with different exp(-s*T) delays are not supported");
+                return std::nullopt;
+            }
             a = radd(*a, *b, c == '+' ? 1.0 : -1.0);
         }
         return a;
@@ -247,6 +255,19 @@ private:
                 // Numeric function of constants (sqrt, exp, ...).
                 ++m_i;
                 auto a = expr();
+                // exp(-s*T): a pure delay.
+                if (a && peek() == ')' && low == QLatin1String("exp") && a->d.size() == 1 && a->n.size() == 2
+                    && std::fabs(a->n[0]) < 1e-300 && a->delay == 0) {
+                    ++m_i;
+                    const double k = a->n[1] / a->d[0];
+                    if (k > 0) {
+                        m_err = QStringLiteral("exp(+s*T) (a time advance) is not realizable");
+                        return std::nullopt;
+                    }
+                    R r = R::constant(1.0);
+                    r.delay = -k;
+                    return r;
+                }
                 if (peek() != ')' || !a || !a->isConstant()) {
                     m_err = QStringLiteral("function %1() needs a constant argument").arg(id);
                     return std::nullopt;
@@ -288,6 +309,12 @@ std::optional<Rational> parse(const QString &expr, const std::function<std::opti
     Rational out;
     out.num = trim(r->n);
     out.den = trim(r->d);
+    out.delay = r->delay;
+    if (out.delay < 0) {
+        if (error)
+            *error = QStringLiteral("negative delay (time advance) is not realizable");
+        return std::nullopt;
+    }
     // Normalize so the highest denominator coefficient is 1.
     const double lead = out.den.last();
     if (lead == 0) {

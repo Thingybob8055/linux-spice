@@ -7,7 +7,7 @@ set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-find_package(Qt6 6.5 REQUIRED COMPONENTS Core Gui Widgets Svg PrintSupport Concurrent)
+find_package(Qt6 6.5 REQUIRED COMPONENTS Core Gui Widgets Svg PrintSupport Concurrent Test)
 find_package(ZLIB REQUIRED)
 
 set(CORE_SOURCES
@@ -67,10 +67,18 @@ set(GUI_SOURCES
     src/gui/dialogs/MiscDialogs.cpp
 )
 
-add_executable(linspice src/main.cpp ${SIM_SOURCES} ${GUI_SOURCES})
+add_library(linspice_gui STATIC ${SIM_SOURCES} ${GUI_SOURCES})
+target_link_libraries(linspice_gui PUBLIC linspice_core Qt6::Widgets Qt6::Svg Qt6::PrintSupport Qt6::Concurrent ${CMAKE_DL_LIBS})
+target_include_directories(linspice_gui PUBLIC src)
+
+add_executable(linspice src/main.cpp)
 target_compile_definitions(linspice PRIVATE LINSPICE_VERSION="${PROJECT_VERSION}")
-target_link_libraries(linspice PRIVATE linspice_core Qt6::Widgets Qt6::Svg Qt6::PrintSupport Qt6::Concurrent ${CMAKE_DL_LIBS})
-target_include_directories(linspice PRIVATE src)
+target_link_libraries(linspice PRIVATE linspice_gui)
+
+add_executable(gui_tests tests/gui_tests.cpp)
+target_link_libraries(gui_tests PRIVATE linspice_gui Qt6::Test)
+add_test(NAME gui_tests COMMAND gui_tests)
+set_tests_properties(gui_tests PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
 include(GNUInstallDirs)
 install(TARGETS linspice RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})

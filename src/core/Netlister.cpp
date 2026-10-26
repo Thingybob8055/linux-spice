@@ -39,6 +39,11 @@ private:
 
 } // namespace
 
+bool isJumper(const SymbolInstance &s)
+{
+    return s.def && QFileInfo(normalizeSymbolName(s.symbolName)).fileName() == QLatin1String("jumper");
+}
+
 bool looksLikeModelFile(const QString &s)
 {
     static const QRegularExpression re(QStringLiteral("\\.(sub|lib|mod|cir|inc|txt|sp|spi|spice|ckt|net|bjt|dio|mos|jft|subckt)$"),
@@ -192,7 +197,112 @@ Connectivity Netlister::connectivity(const Schematic &sch, QStringList *warnings
         for (const QPoint &p : pins)
             pinsAtPoint[Connectivity::key(p)]++;
 
-    // Auto names are assigned in symbol order so that netlists are stable.
+    // Auto names (N001, N002, ...) are assigned in a spatial order so they
+    // match the names LTspice gives the same schematic.
+    {
+        const QByteArray mode = qgetenv("LINSPICE_NETORDER");
+        if (mode != "symbol") {
+            QHash<int, QPoint> best; // root -> sort point
+            auto yxLess = [](QPoint a, QPoint q) { return a.y() != q.y() ? a.y() < q.y() : a.x() < q.x(); };
+            QSet<int> wired;
+            if (mode.isEmpty() || mode == "wire") {
+                // LTspice stores each wire with its larger endpoint (by y, then x)
+                // first, keeps wires sorted by that point and numbers nets in
+                // order of first appearance.
+                for (const Wire &w : sch.wires) {
+                    const QPoint key = yxLess(w.a, w.b) ? w.b : w.a;
+                    const int r = uf.find(pointId.value(Connectivity::key(w.a)));
+                    if (rootName.value(r) == QLatin1String("0"))
+                        continue;
+                    wired.insert(r);
+                    auto b = best.find(r);
+                    if (b == best.end())
+                        best.insert(r, key);
+                    else if (yxLess(key, b.value()))
+                        b.value() = key;
+                }
+            }
+            for (auto it = pointId.constBegin(); it != pointId.constEnd(); ++it) {
+                if (mode.isEmpty() || mode == "wire") {
+                    // Nets without wires (pins touching directly) fall back to the pin point.
+                    const int r0 = uf.find(it.value());
+                    if (wired.contains(r0))
+                        continue;
+                }
+                const int r = uf.find(it.value());
+                if (rootName.value(r) == QLatin1String("0"))
+                    continue;
+                if (rootSize.value(r) <= 1 && pinsAtPoint.value(it.key()) <= 1)
+                    continue; // lonely pin -> NC_xx later
+                const QPoint p(int(it.key() >> 32), int(qint32(it.key() & 0xffffffff)));
+                auto b = best.find(r);
+                auto less = [&mode](QPoint a, QPoint q) {
+                    if (mode == "xy")
+                        return a.x() != q.x() ? a.x() < q.x() : a.y() < q.y();
+                    if (mode == "maxyx")
+                        return a.y() != q.y() ? a.y() > q.y() : a.x() < q.x();
+                    return a.y() != q.y() ? a.y() < q.y() : a.x() < q.x();
+                };
+                if (b == best.end())
+                    best.insert(r, p);
+                else if (less(p, b.value()))
+                    b.value() = p;
+            }
+            QList<QPair<QPoint, int>> order;
+            for (auto it = best.constBegin(); it != best.constEnd(); ++it)
+                order.append({it.value(), it.key()});
+            std::sort(order.begin(), order.end(), [&mode](const auto &a, const auto &b) {
+                if (mode == "xy")
+                    return a.first.x() != b.first.x() ? a.first.x() < b.first.x() : a.first.y() < b.first.y();
+                return a.first.y() != b.first.y() ? a.first.y() < b.first.y() : a.first.x() < b.first.x();
+            });
+            // Named nets keep their label but still use up a number (as in LTspice).
+            int pinIndex = 0;
+            for (const auto &o : order) {
+                if (rootName.contains(o.second))
+                    continue;
+                if ((mode.isEmpty() || mode == "wire") && !wired.contains(o.second)) {
+                    // Pins touching directly (no wire) get P001, P002, ... like LTspice.
+                    QString n;
+                    do {
+                        n = QStringLiteral("P%1").arg(++pinIndex, 3, 10, QChar('0'));
+                    } while (used.contains(n.toLower()));
+                    used.insert(n.toLower());
+                    rootName.insert(o.second, n);
+                } else {
+                    rootName.insert(o.second, autoName());
+                }
+            }
+        }
+    }
+    // Wire jumpers join two nets. LTspice numbers both sides first and then
+    // merges them, keeping a label name if either side has one.
+    auto isAuto = [](const QString &n) { return n.size() == 4 && n.startsWith('N') && n.mid(1).toInt() > 0; };
+    for (int i = 0; i < sch.symbols.size(); ++i) {
+        if (!isJumper(sch.symbols[i]) || pinPos[i].size() != 2)
+            continue;
+        const int ra = uf.find(pointId.value(Connectivity::key(pinPos[i][0])));
+        const int rb = uf.find(pointId.value(Connectivity::key(pinPos[i][1])));
+        if (ra == rb)
+            continue;
+        const QString na = rootName.value(ra), nb = rootName.value(rb);
+        QString keep;
+        if (na == QLatin1String("0") || nb == QLatin1String("0"))
+            keep = QStringLiteral("0");
+        else if (!na.isEmpty() && !isAuto(na))
+            keep = na;
+        else if (!nb.isEmpty() && !isAuto(nb))
+            keep = nb;
+        else
+            keep = na.isEmpty() ? nb : (nb.isEmpty() ? na : std::min(na, nb));
+        uf.unite(ra, rb);
+        const int r = uf.find(ra);
+        rootName.remove(ra);
+        rootName.remove(rb);
+        if (!keep.isEmpty())
+            rootName.insert(r, keep);
+        rootSize[r] = rootSize.value(ra) + rootSize.value(rb);
+    }
     c.symbolPinNets.reserve(sch.symbols.size());
     int ncIndex = 0;
     for (int i = 0; i < sch.symbols.size(); ++i) {
@@ -252,6 +362,8 @@ QStringList Netlister::sheetBody(const Schematic &sch, const Connectivity &conn,
             m_result.errors << QStringLiteral("Could not find symbol \"%1\"").arg(s.symbolName);
             continue;
         }
+        if (isJumper(s))
+            continue; // merged into one net by connectivity()
         QString ascPath;
         const bool hier = isHierarchicalBlock(s, schDir, &ascPath);
         QString prefix = s.attr(QStringLiteral("Prefix")).trimmed();
@@ -327,9 +439,13 @@ QStringList Netlister::sheetBody(const Schematic &sch, const Connectivity &conn,
             continue;
         }
 
-        const QString spiceModel = s.attr(QStringLiteral("SpiceModel")).trimmed();
-        const QString value = s.attr(QStringLiteral("Value")).trimmed();
-        const QString value2 = s.attr(QStringLiteral("Value2")).trimmed();
+        auto attrOf = [&s](const char *key) {
+            QString v = s.attr(QLatin1String(key)).trimmed();
+            return v == QLatin1String("\"\"") ? QString() : v; // LTspice drops empty quoted values
+        };
+        const QString spiceModel = attrOf("SpiceModel");
+        const QString value = attrOf("Value");
+        const QString value2 = attrOf("Value2");
         const QString spiceLine = s.attr(QStringLiteral("SpiceLine")).trimmed();
         const QString spiceLine2 = s.attr(QStringLiteral("SpiceLine2")).trimmed();
         const QString modelFile = s.attr(QStringLiteral("ModelFile")).trimmed();

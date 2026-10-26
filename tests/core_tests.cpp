@@ -13,6 +13,7 @@
 #include "core/StepSweep.h"
 #include "core/SymbolLibrary.h"
 #include "core/Units.h"
+#include "core/TextIO.h"
 
 #include <QCoreApplication>
 #include <QDirIterator>
@@ -247,8 +248,13 @@ int main(int argc, char **argv)
     const QStringList args = app.arguments();
     if (args.size() >= 3 && args[1] == "--netlist") {
         Schematic s;
-        s.load(args[2]);
-        const NetlistResult r = Netlister(s).build();
+        NetlistResult r;
+        if (args[2].endsWith(".asc", Qt::CaseInsensitive)) {
+            s.load(args[2]);
+            r = Netlister(s).build();
+        } else {
+            r.text = textio::readText(args[2]);
+        }
         std::printf("=== LTspice netlist\n%s\n", qPrintable(r.text));
         for (const QString &e : r.errors)
             std::printf("netlist error: %s\n", qPrintable(e));
@@ -264,6 +270,50 @@ int main(int argc, char **argv)
             std::printf("error: %s\n", qPrintable(e));
         for (const QString &e : t.warnings)
             std::printf("warning: %s\n", qPrintable(e));
+        return 0;
+    }
+    if (args.size() >= 3 && args[1] == "--netcompare") {
+        // Compare node names per element with LTspice-generated .net files in a directory.
+        int total = 0, match = 0, files = 0, filesOk = 0;
+        QDirIterator it(args[2], {"*.net"}, QDir::Files);
+        while (it.hasNext()) {
+            const QString net = it.next();
+            const QString asc = net.left(net.size() - 4) + ".asc";
+            if (!QFileInfo::exists(asc))
+                continue;
+            Schematic s;
+            if (!s.load(asc))
+                continue;
+            const NetlistResult r = Netlister(s).build();
+            QHash<QString, QStringList> ours;
+            for (const QString &l : r.text.split('\n')) {
+                const QStringList t = l.split(' ', Qt::SkipEmptyParts);
+                if (t.size() > 2 && !l.startsWith('.') && !l.startsWith('*'))
+                    ours.insert(t[0].toUpper(), t.mid(1));
+            }
+            bool fileOk = true;
+            ++files;
+            for (const QString &l : textio::splitLines(textio::readText(net))) {
+                const QStringList t = l.split(' ', Qt::SkipEmptyParts);
+                if (t.size() < 3 || l.startsWith('.') || l.startsWith('*') || !ours.contains(t[0].toUpper()))
+                    continue;
+                const QStringList o = ours.value(t[0].toUpper());
+                for (int i = 1; i < t.size() && i - 1 < o.size(); ++i) {
+                    if (!t[i].startsWith(QLatin1String("N0"), Qt::CaseInsensitive) && !o[i - 1].startsWith(QLatin1String("N0"), Qt::CaseInsensitive))
+                        continue;
+                    ++total;
+                    if (t[i].compare(o[i - 1], Qt::CaseInsensitive) == 0)
+                        ++match;
+                    else
+                        fileOk = false;
+                }
+            }
+            if (fileOk)
+                ++filesOk;
+            else if (qEnvironmentVariableIsSet("SHOW"))
+                std::printf("mismatch: %s\n", qPrintable(asc));
+        }
+        std::printf("node refs matched %d/%d, files fully matching %d/%d\n", match, total, filesOk, files);
         return 0;
     }
     if (args.size() >= 3 && args[1] == "--corpus")

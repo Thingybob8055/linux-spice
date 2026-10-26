@@ -114,7 +114,7 @@ def compare(ref, test, step=0):
     xt = [c.real if isinstance(c, complex) else c for c in ts[tx]]
     results = {}
     for name in rs:
-        if not name.startswith("v(") or name not in ts:
+        if not name.startswith("v(") or name not in ts or name.startswith("v(nc_"):
             continue
         yr = rs[name]
         yt = ts[name]

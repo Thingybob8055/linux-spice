@@ -56,6 +56,9 @@ QStringList ModelLibrary::logicalLines(const QString &text)
             continue;
         }
         QString l = raw;
+        // The micro sign is a valid SPICE multiplier in LTspice files.
+        l.replace(QChar(0xB5), 'u');
+        l.replace(QChar(0x03BC), 'u');
         // Inline ';' comments (LTspice) — but keep ';' inside quotes/braces untouched.
         int depth = 0;
         bool quote = false;

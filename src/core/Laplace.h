@@ -14,6 +14,7 @@ namespace laplace {
 struct Rational {
     QVector<double> num; // ascending powers of s
     QVector<double> den;
+    double delay = 0; // seconds, from exp(-s*T) factors
 };
 
 std::optional<Rational> parse(const QString &expr, const std::function<std::optional<double>(const QString &)> &lookup,

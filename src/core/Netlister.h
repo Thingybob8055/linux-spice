@@ -63,3 +63,5 @@ private:
 
 // True if an attribute value names a model file rather than a model.
 bool looksLikeModelFile(const QString &s);
+// The Misc\\jumper symbol: joins two nets, not a netlist element.
+bool isJumper(const SymbolInstance &s);

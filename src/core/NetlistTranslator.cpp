@@ -585,6 +585,19 @@ TranslationResult NetlistTranslator::translate(const QStringList &ltLines, const
             l += ' ' + add.join(' ');
         }
     }
+    // ngspice's parameter substitution mis-evaluates some "{expr}" forms inside
+    // behavioral expressions (e.g. "x/{a*b}"); behavioral sources can reference
+    // parameters directly, so plain parentheses are used there instead.
+    for (QString &l : out) {
+        if (!l.startsWith('B', Qt::CaseInsensitive))
+            continue;
+        const int eq = l.indexOf('=');
+        if (eq < 0)
+            continue;
+        QString expr = l.mid(eq + 1);
+        expr.replace('{', '(').replace('}', ')');
+        l = l.left(eq + 1) + expr;
+    }
     disambiguateModels(out);
     m_res.netlist = out.join('\n') + '\n';
     m_res.hasAnalysis = !m_res.analysis.isEmpty();
@@ -1428,6 +1441,10 @@ QStringList NetlistTranslator::translateSource(const QStringList &t)
                 }
                 func = QStringLiteral("SIN(%1)").arg(args.join(' '));
             } else if (fn == QLatin1String("pulse")) {
+                // ngspice treats zero rise/fall/width as "use the default"; LTspice means zero.
+                for (int ai = 3; ai <= 5 && ai < args.size(); ++ai)
+                    if (isNumeric(args[ai]) && numberOr(args[ai], 1) == 0)
+                        args[ai] = QStringLiteral("1e-12");
                 func = QStringLiteral("PULSE(%1)").arg(args.join(' '));
             } else {
                 func = QStringLiteral("%1(%2)").arg(fn.toUpper(), args.join(' '));
@@ -1598,7 +1615,7 @@ QStringList NetlistTranslator::translateBehavioral(const QString &lineIn)
         const QString inNode = internalNode(head[0], 51);
         QStringList out;
         out << QStringLiteral("%1_lin %2 0 V=%3").arg(name, inNode, expr);
-        out << laplaceSource(name, kind == 'V' ? QChar('E') : QChar('G'), n1, n2, QStringLiteral("%v(%1)").arg(inNode), params);
+        out << laplaceSource(name, kind == 'V' ? QChar('E') : QChar('G'), n1, n2, QStringLiteral("V(%1)").arg(inNode), params);
         return out;
     }
 
@@ -1680,7 +1697,7 @@ QStringList NetlistTranslator::translateControlled(const QStringList &t, const Q
             m_res.errors << QStringLiteral("%1: Laplace source needs controlling nodes").arg(t[0]);
             return {};
         }
-        return laplaceSource(name, k, n1, n2, QStringLiteral("%vd(%1 %2)").arg(nodeToken(t[3]), nodeToken(t[4])), line);
+        return laplaceSource(name, k, n1, n2, QStringLiteral("V(%1,%2)").arg(nodeToken(t[3]), nodeToken(t[4])), line);
     }
     QStringList out = t;
     out[0] = name;
@@ -1731,12 +1748,20 @@ QStringList NetlistTranslator::translateSemiconductor(const QStringList &t)
     }
     for (int i = 1; i <= nodes && i < out.size(); ++i)
         out[i] = nodeToken(out[i]);
-    const int modelIdx = nodes + 1;
+    int modelIdx = nodes + 1;
     if (modelIdx >= out.size()) {
         m_res.errors << QStringLiteral("%1: missing model name").arg(t[0]);
         return {out.join(' ')};
     }
-    const QString modelType = m_modelTypes.value(out[modelIdx].toLower());
+    QString modelType = m_modelTypes.value(out[modelIdx].toLower());
+    // LTspice accepts "M d g s b model" for VDMOS and ignores the body; ngspice's
+    // VDMOS would read a 4th node as a thermal node, so drop it.
+    if (k == 'M' && nodes == 4 && m_modelTypes.value(out[5].toLower()) == QLatin1String("VDMOS")) {
+        out.removeAt(4);
+        nodes = 3;
+        modelIdx = 4;
+        modelType = QStringLiteral("VDMOS");
+    }
     if (k == 'Z' && (modelType == QLatin1String("NIGBT") || modelType == QLatin1String("PIGBT")))
         m_res.errors << QStringLiteral("%1: IGBT models are not supported by ngspice").arg(t[0]);
 
@@ -1875,35 +1900,55 @@ QStringList NetlistTranslator::translateDigital(const QStringList &t)
         stateNode(QStringLiteral("sl"), slave);
         logic = hold(sc);
     } else if (model == QLatin1String("OTA")) {
-        // Transconductance amplifier: I(out) = G * V(in+,in-) [* V(mult+,mult-)], limited to
-        // [Isink, Iout] and clamped to the output compliance range.
-        const double g = numberOr(p.value(QStringLiteral("g")), 1.0);
-        const double iout = numberOr(p.value(QStringLiteral("iout")), 10e-6);
-        const double isink = numberOr(p.value(QStringLiteral("isink")), -iout);
-        const double ovh = numberOr(p.value(QStringLiteral("vhigh")), 2.0);
-        const double ovl = numberOr(p.value(QStringLiteral("vlow")), 0.0);
+        // Transconductance amplifier: I(out) = G * (V(in+,in-) + ref) [* V(mult+,mult-)],
+        // limited to [Isink, Iout] (unless "linear") and clamped to the output compliance range.
+        // Parameter values are passed through in braces so subcircuit parameters evaluate in place.
+        auto pv = [&](const char *key, const QString &def) {
+            const QString k = QLatin1String(key);
+            if (!p.contains(k))
+                return def;
+            QString v = p.value(k);
+            if (v.startsWith('{') && v.endsWith('}'))
+                v = v.mid(1, v.size() - 2);
+            return QStringLiteral("{%1}").arg(rewriteExpression(v));
+        };
+        bool linear = false;
+        for (int i = 10; i < t.size(); ++i)
+            if (t[i].compare(QLatin1String("linear"), Qt::CaseInsensitive) == 0)
+                linear = true;
+        const QString g = pv("g", QStringLiteral("1"));
+        const QString ref = pv("ref", QStringLiteral("0"));
         const QString inn = pin(1), inp = pin(2), m1 = pin(3), m2 = pin(4), vneg = pin(5), vpos = pin(6);
         const QString outN = t[7] == QLatin1String("0") ? QString() : nodeToken(t[7]);
         if (outN.isEmpty())
             return out;
         auto v = [&](const QString &n) { return n.isEmpty() ? QStringLiteral("V(%1)").arg(com) : QStringLiteral("V(%1)").arg(n); };
-        QString vin = QStringLiteral("(%1-%2)").arg(v(inp), v(inn));
+        QString vin = QStringLiteral("(%1-%2+%3)").arg(v(inp), v(inn), ref);
         if (!m1.isEmpty() || !m2.isEmpty())
             vin = QStringLiteral("(%1*(%2-%3))").arg(vin, v(m1), v(m2));
-        QString iexpr;
-        if (std::fabs(isink + iout) < 1e-30 && iout > 0)
-            iexpr = QStringLiteral("%1*tanh(%2*%3/%1)").arg(iout, 0, 'g', 12).arg(g, 0, 'g', 12).arg(vin);
-        else
-            iexpr = QStringLiteral("min(max(%1*%2,%3),%4)").arg(g, 0, 'g', 12).arg(vin).arg(isink, 0, 'g', 12).arg(iout, 0, 'g', 12);
-        const QString hi = vpos.isEmpty() ? QStringLiteral("(V(%1)+%2)").arg(com).arg(ovh, 0, 'g', 12) : QStringLiteral("V(%1)").arg(vpos);
-        const QString lo = vneg.isEmpty() ? QStringLiteral("(V(%1)+%2)").arg(com).arg(ovl, 0, 'g', 12) : QStringLiteral("V(%1)").arg(vneg);
+        QString iexpr = QStringLiteral("%1*%2").arg(g, vin);
+        const bool hasIout = p.contains(QStringLiteral("iout")), hasIsink = p.contains(QStringLiteral("isink"));
+        if (!linear && (hasIout || hasIsink)) {
+            const QString iout = pv("iout", hasIsink ? QStringLiteral("(-(%1))").arg(pv("isink", QStringLiteral("0"))) : QStringLiteral("1e30"));
+            const QString isink = pv("isink", QStringLiteral("(-(%1))").arg(iout));
+            if (!hasIsink)
+                iexpr = QStringLiteral("%1*tanh((%2)/%1)").arg(iout, iexpr);
+            else
+                iexpr = QStringLiteral("min(max(%1,%2),%3)").arg(iexpr, isink, iout);
+        }
+        QString clamp;
+        const bool hugeHigh = numberOr(p.value(QStringLiteral("vhigh")), 0) >= 1e100;
+        const bool hugeLow = numberOr(p.value(QStringLiteral("vlow")), 0) <= -1e100;
+        const QString hi = vpos.isEmpty() ? QStringLiteral("(V(%1)+%2)").arg(com, pv("vhigh", QStringLiteral("1e30"))) : QStringLiteral("V(%1)").arg(vpos);
+        const QString lo = vneg.isEmpty() ? QStringLiteral("(V(%1)+%2)").arg(com, pv("vlow", QStringLiteral("-1e30"))) : QStringLiteral("V(%1)").arg(vneg);
+        if (!(vpos.isEmpty() && hugeHigh && vneg.isEmpty() && hugeLow) && (p.contains(QStringLiteral("vhigh")) || p.contains(QStringLiteral("vlow")) || !vpos.isEmpty() || !vneg.isEmpty()))
+            clamp = QStringLiteral(" - 1k*(uramp(V(%1)-%2) - uramp(%3-V(%1)))").arg(outN, hi, lo);
         // Current flows into the output node (B source I flows from n+ to n- through the source).
-        out << QStringLiteral("B%1_ota %2 %3 I=%4 - 1k*(uramp(V(%3)-%5) - uramp(%6-V(%3)))")
-                   .arg(name, com, outN, iexpr, hi, lo);
+        out << QStringLiteral("B%1_ota %2 %3 I=%4%5").arg(name, com, outN, iexpr, clamp);
         if (p.contains(QStringLiteral("rout")))
-            out << QStringLiteral("R%1_rout %2 %3 %4").arg(name, outN, com, p.value(QStringLiteral("rout")));
+            out << QStringLiteral("R%1_rout %2 %3 %4").arg(name, outN, com, pv("rout", QStringLiteral("1e12")));
         if (p.contains(QStringLiteral("cout")))
-            out << QStringLiteral("C%1_cout %2 %3 %4").arg(name, outN, com, p.value(QStringLiteral("cout")));
+            out << QStringLiteral("C%1_cout %2 %3 %4").arg(name, outN, com, pv("cout", QStringLiteral("0")));
         return out;
     } else if (model == QLatin1String("VARISTOR")) {
         // Conducts between out and com once |V(out,com)| exceeds the control voltage V(in+,in-).
@@ -2113,13 +2158,66 @@ QStringList NetlistTranslator::laplaceSource(const QString &name, QChar kind, co
         m_res.errors << QStringLiteral("%1: %2").arg(name, err);
         return {};
     }
-    if (tf->num.size() > tf->den.size())
-        m_res.warnings << QStringLiteral("%1: improper Laplace transfer function (numerator order > denominator order)").arg(name);
-    const QString model = QStringLiteral("lsxfer_%1").arg(QString(name).toLower().replace(QRegularExpression(QStringLiteral("[^a-z0-9_]")), QStringLiteral("_")));
-    const QString outPort = kind == 'G' ? QStringLiteral("%id(%1 %2)").arg(n1, n2) : QStringLiteral("%vd(%1 %2)").arg(n1, n2);
-    return {QStringLiteral("A%1_lap %2 %3 %4").arg(name, input, outPort, model),
-            QStringLiteral(".model %1 s_xfer(gain=1 num_coeff=%2 den_coeff=%3)")
-                .arg(model, laplace::coeffList(tf->num), laplace::coeffList(tf->den))};
+    if (tf->num.size() > tf->den.size()) {
+        m_res.errors << QStringLiteral("%1: improper Laplace transfer function (numerator order > denominator order)").arg(name);
+        return {};
+    }
+    // Realize H(s) = N(s)/D(s) in controllable canonical form with frequency
+    // scaling (s = wc*p) so coefficients stay well conditioned. Each state is
+    // the voltage of a 1F capacitor driven by a behavioral current, so the DC
+    // operating point and AC response follow from ordinary circuit elements.
+    const int n = int(tf->den.size()) - 1; // den is monic (normalized by the parser)
+    QStringList out;
+    QString u = input;
+    if (tf->delay > 0) {
+        // Pure delay: ideal transmission line, driven by a buffer and matched at its end.
+        const QString a = internalNode(name, 61), d = internalNode(name, 62);
+        out << QStringLiteral("B%1_din %2 0 V=%3").arg(name, a, input);
+        out << QStringLiteral("T%1_del %2 0 %3 0 Z0=1 Td=%4").arg(name, a, d).arg(tf->delay, 0, 'g', 15);
+        out << QStringLiteral("R%1_del %2 0 1").arg(name, d);
+        u = QStringLiteral("V(%1)").arg(d);
+    }
+    auto num = [](double v) { return QString::number(v, 'g', 15); };
+    QString yexpr;
+    if (n == 0) {
+        yexpr = QStringLiteral("%1*(%2)").arg(num(tf->num.value(0) / tf->den[0]), u);
+    } else {
+        double wc = std::pow(std::fabs(tf->den[0]), 1.0 / n);
+        if (!(wc > 0) || !std::isfinite(wc))
+            wc = 1.0; // e.g. pure integrators (a0 = 0)
+        QVector<double> a(n), b(n + 1, 0.0);
+        for (int i = 0; i < n; ++i)
+            a[i] = tf->den[i] / std::pow(wc, n - i);
+        for (int i = 0; i < tf->num.size(); ++i)
+            b[i] = tf->num[i] / std::pow(wc, n - i);
+        QStringList states;
+        for (int k = 0; k < n; ++k)
+            states << internalNode(name, 70 + k);
+        for (int k = 0; k < n; ++k) {
+            QString deriv;
+            if (k < n - 1) {
+                deriv = QStringLiteral("V(%1)").arg(states[k + 1]);
+            } else {
+                deriv = QStringLiteral("(%1)").arg(u);
+                for (int i = 0; i < n; ++i)
+                    if (a[i] != 0)
+                        deriv += QStringLiteral("-(%1)*V(%2)").arg(num(a[i]), states[i]);
+            }
+            out << QStringLiteral("B%1_s%2 0 %3 I=%4*(%5)").arg(name).arg(k).arg(states[k], num(wc), deriv);
+            out << QStringLiteral("C%1_s%2 %3 0 1").arg(name).arg(k).arg(states[k]);
+        }
+        QStringList terms;
+        for (int i = 0; i < n; ++i) {
+            const double c = b[i] - b[n] * a[i];
+            if (c != 0)
+                terms << QStringLiteral("(%1)*V(%2)").arg(num(c), states[i]);
+        }
+        if (b[n] != 0)
+            terms << QStringLiteral("(%1)*(%2)").arg(num(b[n]), u);
+        yexpr = terms.isEmpty() ? QStringLiteral("0") : terms.join('+');
+    }
+    out << QStringLiteral("B%1_lap %2 %3 %4=%5").arg(name, n1, n2, kind == 'G' ? QStringLiteral("I") : QStringLiteral("V"), yexpr);
+    return out;
 }
 
 QStringList NetlistTranslator::translateMutual(const QStringList &t)
@@ -2177,6 +2275,22 @@ QString NetlistTranslator::translateModel(const QString &lineIn)
     // Model type aliases.
     static const QRegularExpression typeRe(QStringLiteral("^(\\.model\\s+\\S+\\s+)(LPNP)\\b"), QRegularExpression::CaseInsensitiveOption);
     line.replace(typeRe, QStringLiteral("\\1PNP"));
+    // LTspice's VDMOS has no gate-drain capacitance unless given; ngspice's defaults are non-zero.
+    {
+        static const QRegularExpression vd(QStringLiteral("^\\.model\\s+\\S+\\s+VDMOS\\b"), QRegularExpression::CaseInsensitiveOption);
+        if (vd.match(line).hasMatch()) {
+            QStringList add;
+            for (const char *k : {"cgdmax", "cgdmin", "cgs"})
+                if (!line.contains(QRegularExpression(QStringLiteral("\\b%1\\s*=").arg(QLatin1String(k)), QRegularExpression::CaseInsensitiveOption)))
+                    add << QStringLiteral("%1=0").arg(QLatin1String(k));
+            if (!add.isEmpty()) {
+                if (line.contains(')'))
+                    line.insert(line.lastIndexOf(')'), ' ' + add.join(' '));
+                else
+                    line += QStringLiteral(" (%1)").arg(add.join(' '));
+            }
+        }
+    }
     // Step overrides of model parameters.
     const QStringList mt = line.split(QRegularExpression(QStringLiteral("\\s+")), Qt::SkipEmptyParts);
     if (mt.size() > 1) {
