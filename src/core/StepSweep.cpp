@@ -17,7 +17,7 @@ QStringList splitWs(const QString &s)
 bool evalNumber(const QString &text, double *out)
 {
     QString t = text.trimmed();
-    if (t.startsWith('{') && t.endsWith('}'))
+    if (units::isBraced(t))
         t = t.mid(1, t.size() - 2);
     if (auto v = units::parseSpiceNumber(t); v && QRegularExpression(QStringLiteral("^[-+]?[0-9.]")).match(t).hasMatch()) {
         // Plain numbers (possibly with suffix); make sure no operators follow.
@@ -64,7 +64,7 @@ bool StepPlan::parse(const QStringList &lines, QString *error)
 {
     m_axes.clear();
     for (const QString &raw : lines) {
-        const QString line = raw.trimmed();
+        const QString line = raw.section(';', 0, 0).trimmed(); // ';' starts a comment
         const QString low = line.toLower();
         if (low.startsWith(QLatin1String(".temp")) && !low.startsWith(QLatin1String(".temp="))) {
             const QStringList t = splitWs(line.mid(5).replace('=', ' '));
@@ -99,6 +99,13 @@ bool StepPlan::parse(const QStringList &lines, QString *error)
         QString mode = QStringLiteral("lin");
         if (QStringList{QStringLiteral("lin"), QStringLiteral("oct"), QStringLiteral("dec")}.contains(t[0].toLower()))
             mode = t.takeFirst().toLower();
+        // ".step NPN 2N2222(Vaf) ...": the device type before a model parameter is optional.
+        static const QStringList modelTypes = {QStringLiteral("npn"), QStringLiteral("pnp"), QStringLiteral("lpnp"), QStringLiteral("nmos"),
+                                               QStringLiteral("pmos"), QStringLiteral("vdmos"), QStringLiteral("njf"), QStringLiteral("pjf"),
+                                               QStringLiteral("d"), QStringLiteral("nmf"), QStringLiteral("pmf"), QStringLiteral("sw"),
+                                               QStringLiteral("csw")};
+        if (t.size() > 1 && modelTypes.contains(t[0].toLower()) && t[1].contains('('))
+            t.removeFirst();
         StepAxis ax;
         if (!t.isEmpty() && t[0].compare(QLatin1String("param"), Qt::CaseInsensitive) == 0) {
             t.removeFirst();

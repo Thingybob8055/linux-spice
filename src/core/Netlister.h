@@ -39,7 +39,10 @@ public:
     // Name an element would get in the netlist (prefix handling, '§' separator).
     static QString spiceNameFor(const SymbolInstance &s);
     // True if a symbol stands for a hierarchical sub-schematic; fills path.
-    static bool isHierarchicalBlock(const SymbolInstance &s, const QString &schDir, QString *ascPath);
+    // `selfPath` is the schematic containing the symbol: a schematic is never a block of itself
+    // (e.g. examples named after the library symbol they use, such as opamp.asc).
+    static bool isHierarchicalBlock(const SymbolInstance &s, const QString &schDir, QString *ascPath,
+                                    const QString &selfPath = QString());
 
 private:
     struct SubcktJob {

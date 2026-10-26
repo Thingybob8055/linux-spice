@@ -62,6 +62,9 @@ private:
     QStringList translateSemiconductor(const QStringList &t);
     QStringList translateDigital(const QStringList &t);
     QStringList translateMutual(const QStringList &t);
+    // 1T resistors to ground for top-level nodes with no DC path to ground (e.g. joined only by capacitors),
+    // which LTspice solves but which make the ngspice operating-point matrix singular.
+    static QStringList floatingNodeShunts(const QStringList &elements);
     QStringList translateSwitch(const QStringList &t);
     QStringList translateIdealDiode(const QStringList &t, const QString &modelLine);
     QStringList laplaceSource(const QString &name, QChar kind, const QString &n1, const QString &n2, const QString &input, const QString &line);
@@ -99,6 +102,7 @@ private:
     QHash<QString, QString> m_modelLines; // lower model name -> .model line (for parameter lookups)
     QHash<QString, QSet<int>> m_senses; // lower device name -> 1-based terminals needing a 0V sense source
     double m_tranMaxStep = 0;
+    double m_deviceMaxStep = 0; // timestep limit required by devices without integrated state (e.g. VCO outputs)
     bool m_thevInduc = false;
     int m_includeDepth = 0;
     bool m_inMachine = false;

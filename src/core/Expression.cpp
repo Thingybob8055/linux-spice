@@ -1147,7 +1147,7 @@ bool Expression::defineFromDirective(const QString &line)
     for (const QString &p : m.captured(2).split(',', Qt::SkipEmptyParts))
         params << p.trimmed();
     QString body = m.captured(3).trimmed();
-    if (body.startsWith('{') && body.endsWith('}'))
+    if (units::isBraced(body))
         body = body.mid(1, body.size() - 2);
     defineFunction(m.captured(1), params, body);
     return true;

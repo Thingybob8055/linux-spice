@@ -41,8 +41,9 @@ Poly mul(const Poly &a, const Poly &b)
 struct R {
     Poly n{1.0}, d{1.0};
     double delay = 0;
+    QVector<QPair<double, double>> secs; // (1+s/z)/(1+s/p) factors
     static R constant(double c) { R r; r.n = {c}; return r; }
-    bool isConstant() const { return n.size() == 1 && d.size() == 1; }
+    bool isConstant() const { return n.size() == 1 && d.size() == 1 && secs.isEmpty(); }
     double value() const { return n[0] / d[0]; }
 };
 
@@ -51,7 +52,7 @@ R radd(const R &a, const R &b, double sign = 1.0)
     R r;
     r.n = add(mul(a.n, b.d), mul(b.n, a.d), sign);
     r.d = mul(a.d, b.d);
-    r.delay = a.delay; // callers check that delays match
+    r.delay = a.delay; // callers check that delays match and that there are no sections
     return r;
 }
 
@@ -61,6 +62,7 @@ R rmul(const R &a, const R &b)
     r.n = mul(a.n, b.n);
     r.d = mul(a.d, b.d);
     r.delay = a.delay + b.delay;
+    r.secs = a.secs + b.secs;
     return r;
 }
 
@@ -70,6 +72,9 @@ R rdiv(const R &a, const R &b)
     r.n = mul(a.n, b.d);
     r.d = mul(a.d, b.n);
     r.delay = a.delay - b.delay;
+    r.secs = a.secs;
+    for (const auto &zp : b.secs)
+        r.secs.append({zp.second, zp.first});
     return r;
 }
 
@@ -122,6 +127,10 @@ private:
             auto b = term();
             if (!b)
                 return std::nullopt;
+            if (!a->secs.isEmpty() || !b->secs.isEmpty()) {
+                m_err = QStringLiteral("sums of fractional-order terms are not supported");
+                return std::nullopt;
+            }
             if (std::fabs(a->delay - b->delay) > 1e-30) {
                 m_err = QStringLiteral("sums of terms with different exp(-s*T) delays are not supported");
                 return std::nullopt;
@@ -177,8 +186,10 @@ private:
         const double ev = e->value();
         if (a->isConstant())
             return R::constant(std::pow(a->value(), ev));
-        if (std::floor(ev) != ev || std::fabs(ev) > 20) {
-            m_err = QStringLiteral("only integer powers of s are supported");
+        if (std::floor(ev) != ev)
+            return fractionalPower(*a, ev);
+        if (std::fabs(ev) > 20) {
+            m_err = QStringLiteral("powers of s above 20 are not supported");
             return std::nullopt;
         }
         const int n = int(ev);
@@ -186,6 +197,48 @@ private:
         for (int i = 0; i < std::abs(n); ++i)
             r = rmul(r, *a);
         return n >= 0 ? r : rdiv(R::constant(1.0), r);
+    }
+    // (c0 + c1*s)^e for a non-integer e: the integer part is exact, the
+    // fractional part f is approximated by lead-lag sections spaced three per
+    // decade over six decades above the corner (|error| < 0.1 dB, 0.5 deg).
+    std::optional<R> firstOrderPower(const Poly &c, double e)
+    {
+        if (c.size() == 1)
+            return R::constant(std::pow(c[0], e));
+        if (c.size() != 2 || c[0] == 0 || c[1] / c[0] <= 0) {
+            m_err = QStringLiteral("fractional powers are only supported for (a+b*s) with a, b of the same sign");
+            return std::nullopt;
+        }
+        const double w = c[0] / c[1];
+        const double ip = std::floor(e), f = e - ip;
+        R r = R::constant(std::pow(c[0], e));
+        R lin;
+        lin.n = {1.0, 1.0 / w};
+        for (int i = 0; i < std::abs(int(ip)); ++i)
+            r = ip > 0 ? rmul(r, lin) : rdiv(r, lin);
+        const int perDecade = 3, decades = 6;
+        const double ratio = std::pow(10.0, 1.0 / perDecade), off = (1.0 - f) / 2;
+        for (int k = 0; k < perDecade * decades; ++k) {
+            const double z = w * std::pow(ratio, k + off);
+            r.secs.append({z, z * std::pow(ratio, f)});
+        }
+        return r;
+    }
+    std::optional<R> fractionalPower(const R &a, double e)
+    {
+        if (!a.secs.isEmpty() || a.delay != 0) {
+            m_err = QStringLiteral("fractional power of a delayed or fractional term is not supported");
+            return std::nullopt;
+        }
+        if (a.n.size() > 2 || a.d.size() > 2) {
+            m_err = QStringLiteral("fractional powers are only supported for first-order factors");
+            return std::nullopt;
+        }
+        auto num = firstOrderPower(a.n, e);
+        auto den = num ? firstOrderPower(a.d, e) : std::nullopt;
+        if (!num || !den)
+            return std::nullopt;
+        return rdiv(*num, *den);
     }
     std::optional<R> unary()
     {
@@ -268,6 +321,10 @@ private:
                     r.delay = -k;
                     return r;
                 }
+                if (a && peek() == ')' && low == QLatin1String("sqrt") && !a->isConstant()) {
+                    ++m_i;
+                    return fractionalPower(*a, 0.5);
+                }
                 if (peek() != ')' || !a || !a->isConstant()) {
                     m_err = QStringLiteral("function %1() needs a constant argument").arg(id);
                     return std::nullopt;
@@ -310,6 +367,7 @@ std::optional<Rational> parse(const QString &expr, const std::function<std::opti
     out.num = trim(r->n);
     out.den = trim(r->d);
     out.delay = r->delay;
+    out.sections = r->secs;
     if (out.delay < 0) {
         if (error)
             *error = QStringLiteral("negative delay (time advance) is not realizable");

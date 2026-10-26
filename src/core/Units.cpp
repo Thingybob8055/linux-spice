@@ -141,4 +141,18 @@ QString formatDelta(double dx, const QString &unit)
     return s;
 }
 
+bool isBraced(const QString &s)
+{
+    if (s.size() < 2 || s.front() != '{' || s.back() != '}')
+        return false;
+    int depth = 0;
+    for (int i = 0; i < s.size(); ++i) {
+        if (s[i] == '{')
+            ++depth;
+        else if (s[i] == '}' && --depth == 0)
+            return i == s.size() - 1;
+    }
+    return false;
+}
+
 } // namespace units

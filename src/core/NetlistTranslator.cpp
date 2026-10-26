@@ -6,6 +6,7 @@
 #include "TextIO.h"
 #include "Units.h"
 
+#include <functional>
 #include <QDir>
 #include <QFileInfo>
 #include <QRegularExpression>
@@ -119,7 +120,7 @@ bool isNumeric(const QString &tok)
 
 bool isValueToken(const QString &tok)
 {
-    return isNumeric(tok) || (tok.startsWith('{') && tok.endsWith('}'));
+    return isNumeric(tok) || (units::isBraced(tok));
 }
 
 // Parameter values known to the translator, used to evaluate {expr} in analysis commands.
@@ -129,12 +130,12 @@ double evalParamExpr(const QString &text, int depth = 0);
 
 double numberOr(const QString &tok, double def)
 {
-    if (tok.startsWith('{') && tok.endsWith('}') && g_params) {
+    if (units::isBraced(tok) && g_params) {
         const double v = evalParamExpr(tok.mid(1, tok.size() - 2));
         return std::isnan(v) ? def : v;
     }
     QString t = tok;
-    if (t.startsWith('{') && t.endsWith('}'))
+    if (units::isBraced(t))
         t = t.mid(1, t.size() - 2);
     auto v = units::parseSpiceNumber(t);
     return v ? *v : def;
@@ -285,7 +286,7 @@ QString NetlistTranslator::rewriteExpression(const QString &exprIn)
     QString expr = exprIn;
     expr.replace(QChar(0xB5), 'u');
     // Function rewrites, innermost first by repeated scanning.
-    static const QRegularExpression fnRe(QStringLiteral("\\b(if|limit|table|buf|inv|mc|gauss|flat)\\s*\\("),
+    static const QRegularExpression fnRe(QStringLiteral("\\b(if|limit|table|buf|inv|mc|gauss|flat|u|rand|random|white)\\s*\\("),
                                          QRegularExpression::CaseInsensitiveOption);
     for (int guard = 0; guard < 200; ++guard) {
         // Find the last match so nested calls are rewritten inside-out.
@@ -331,11 +332,27 @@ QString NetlistTranslator::rewriteExpression(const QString &exprIn)
             rep = QStringLiteral("((%1) > 0.5 ? 1 : 0)").arg(a[0]);
         else if (fn == QLatin1String("inv") && a.size() == 1)
             rep = QStringLiteral("((%1) > 0.5 ? 0 : 1)").arg(a[0]);
+        else if ((fn == QLatin1String("rand") || fn == QLatin1String("random") || fn == QLatin1String("white")) && a.size() == 1) {
+            // Deterministic pseudo-random values per integer step of the argument (sine hash);
+            // random()/white() interpolate smoothly between successive values.
+            auto h = [](const QString &n) { return QStringLiteral("(abs(sin((%1)*12.9898+78.233)*43758.5453) - floor(abs(sin((%1)*12.9898+78.233)*43758.5453)))").arg(n); };
+            const QString x = QStringLiteral("(%1)").arg(a[0]);
+            const QString n = QStringLiteral("floor%1").arg(x);
+            if (fn == QLatin1String("rand")) {
+                rep = h(n);
+            } else {
+                const QString f = QStringLiteral("(%1-%2)").arg(x, n);
+                const QString w = QStringLiteral("(%1*%1*(3-2*%1))").arg(f); // smoothstep
+                rep = QStringLiteral("(%1+(%2-%1)*%3%4)").arg(h(n), h(n + QStringLiteral("+1")), w, fn == QLatin1String("white") ? QStringLiteral("-0.5") : QString());
+            }
+        }
+        else if (fn == QLatin1String("u") && a.size() == 1)
+            rep = QStringLiteral("((%1) > 0 ? 1 : 0)").arg(a[0]); // unit step; not available in ngspice .param expressions
         else
             rep = QStringLiteral("%1__(%2)").arg(fn, a.join(',')); // leave as-is (marked to avoid loops)
         expr.replace(last.capturedStart(), close - last.capturedStart() + 1, rep);
     }
-    expr.replace(QRegularExpression(QStringLiteral("\\b(if|limit|table|buf|inv|mc|gauss|flat)__\\(")), QStringLiteral("\\1("));
+    expr.replace(QRegularExpression(QStringLiteral("\\b(if|limit|table|buf|inv|mc|gauss|flat|u|rand|random|white)__\\(")), QStringLiteral("\\1("));
     return expr;
 }
 
@@ -400,6 +417,7 @@ TranslationResult NetlistTranslator::translate(const QStringList &ltLines, const
     m_inductorIc.clear();
     m_stepModelOverrides.clear();
     m_tranMaxStep = 0;
+    m_deviceMaxStep = 0;
     m_thevInduc = false;
     m_startup = false;
     m_inMachine = false;
@@ -449,6 +467,7 @@ TranslationResult NetlistTranslator::translate(const QStringList &ltLines, const
     QStringList elements;
     for (const QString &l : m_topElements)
         elements << translateElement(l, true);
+    elements << floatingNodeShunts(elements);
 
     QStringList subText;
     for (const Subckt &s : m_subckts) {
@@ -502,6 +521,13 @@ TranslationResult NetlistTranslator::translate(const QStringList &ltLines, const
         out << QStringLiteral(".options method=gear");
     if (!m_opts.extraOptions.trimmed().isEmpty())
         out << QStringLiteral(".options %1").arg(m_opts.extraOptions.trimmed());
+    if (m_deviceMaxStep > 0 && !m_analysis.isEmpty() && m_analysis.first().startsWith(QLatin1String(".tran"), Qt::CaseInsensitive)) {
+        const qsizetype nw = m_res.warnings.size();
+        const QString a = translateAnalysis(m_res.analysisLine);
+        m_res.warnings.resize(nw);
+        if (!a.isEmpty())
+            m_analysis = {a};
+    }
     out << m_analysis;
     out << QStringLiteral(".end");
 
@@ -692,7 +718,7 @@ void NetlistTranslator::processLines(const QStringList &lines, int depth)
             while (it.hasNext()) {
                 const auto m = it.next();
                 QString v = m.captured(2);
-                if (v.startsWith('{') && v.endsWith('}'))
+                if (units::isBraced(v))
                     v = v.mid(1, v.size() - 2);
                 m_res.params.insert(m.captured(1).toLower(), v);
             }
@@ -1248,7 +1274,7 @@ QStringList NetlistTranslator::translatePassive(const QStringList &t)
     // Nonlinear capacitor given by its charge: I = d(Q)/dt with x = V(n1,n2).
     if (k == 'C' && p.contains(QStringLiteral("q"))) {
         QString q = p.value(QStringLiteral("q"));
-        if (q.startsWith('{') && q.endsWith('}'))
+        if (units::isBraced(q))
             q = q.mid(1, q.size() - 2);
         q.replace(QRegularExpression(QStringLiteral("\\bx\\b")), QStringLiteral("V(%1,%2)").arg(n1, n2));
         return {QStringLiteral("B%1_q %2 %3 I=ddt(%4)").arg(name, n1, n2, rewriteExpression(q))};
@@ -1277,7 +1303,7 @@ QStringList NetlistTranslator::translatePassive(const QStringList &t)
     static const QRegularExpression dynRe(QStringLiteral("\\b(v|i)\\s*\\(|\\btime\\b"), QRegularExpression::CaseInsensitiveOption);
     if (k == 'R' && dynRe.match(value).hasMatch()) {
         QString e = value;
-        if (e.startsWith('{') && e.endsWith('}'))
+        if (units::isBraced(e))
             e = e.mid(1, e.size() - 2);
         return {QStringLiteral("B%1_r %2 %3 I=V(%2,%3)/(%4)").arg(name, n1, n2, e)};
     }
@@ -1408,6 +1434,9 @@ QStringList NetlistTranslator::translateSource(const QStringList &t)
     QString dc, acMag, acPhase, func, rser, cpar, rpar;
     bool load = false;
     QStringList rest = t.mid(3);
+    for (QString &tok : rest)
+        if (units::isBraced(tok))
+            tok = rewriteExpression(tok);
     for (int i = 0; i < rest.size(); ++i) {
         const QString tok = rest[i];
         const QString lowt = tok.toLower();
@@ -1608,7 +1637,7 @@ QStringList NetlistTranslator::translateBehavioral(const QString &lineIn)
         rest = rest.left(tm.capturedStart());
     }
     QString expr = rewriteCurrents(rewriteExpression(rest.trimmed()));
-    if (expr.startsWith('{') && expr.endsWith('}'))
+    if (units::isBraced(expr))
         expr = expr.mid(1, expr.size() - 2);
     if (params.contains(QLatin1String("laplace"), Qt::CaseInsensitive)) {
         // The B expression is the input of the transfer function.
@@ -1657,7 +1686,7 @@ QStringList NetlistTranslator::translateControlled(const QStringList &t, const Q
         const auto m = valRe.match(line);
         if (m.hasMatch() && line.left(m.capturedStart()).split(QRegularExpression(QStringLiteral("\\s+")), Qt::SkipEmptyParts).size() <= 3) {
             QString expr = m.captured(2).trimmed();
-            if ((expr.startsWith('{') && expr.endsWith('}')) || (expr.startsWith('\'') && expr.endsWith('\'')) || (expr.startsWith('"') && expr.endsWith('"')))
+            if ((units::isBraced(expr)) || (expr.startsWith('\'') && expr.endsWith('\'')) || (expr.startsWith('"') && expr.endsWith('"')))
                 expr = expr.mid(1, expr.size() - 2);
             return {QStringLiteral("B%1 %2 %3 %4=%5").arg(name, n1, n2, bkind, rewriteCurrents(rewriteExpression(expr)))};
         }
@@ -1824,7 +1853,7 @@ QStringList NetlistTranslator::translateDigital(const QStringList &t)
     const QString com = nodeToken(t[8]);
     const double vhigh = numberOr(p.value(QStringLiteral("vhigh")), 1.0);
     const double vlow = numberOr(p.value(QStringLiteral("vlow")), 0.0);
-    const double ref = p.contains(QStringLiteral("ref")) ? numberOr(p.value(QStringLiteral("ref")), 0.5) : 0.5;
+    const double ref = numberOr(p.value(QStringLiteral("ref")), (vhigh + vlow) / 2); // LTspice default: mid-swing
     const double trise = numberOr(p.value(QStringLiteral("trise")), 0.0);
     const double tfall = numberOr(p.value(QStringLiteral("tfall")), trise);
     const double td = numberOr(p.value(QStringLiteral("td")), 0.0);
@@ -1848,22 +1877,40 @@ QStringList NetlistTranslator::translateDigital(const QStringList &t)
         return stc;
     };
     auto hold = [&](const QString &stc) { return QStringLiteral("(V(%1,%2)>0.5 ? 1 : 0)").arg(stc, com); };
+    // Combinational gates use a continuous threshold (0.1mV wide) instead of a hard comparison:
+    // inputs derived from other states move slightly on every Newton iteration, and a hard
+    // threshold sitting at such an input makes the output flip until the timestep collapses.
+    auto smoothIn = [&](const QString &n) {
+        return QStringLiteral("(0.5+0.5*tanh(1e4*(V(%1,%2)-%3)))").arg(n, com).arg(ref, 0, 'g', 12);
+    };
     QString logic;
     if (model == QLatin1String("AND") || model == QLatin1String("OR") || model == QLatin1String("XOR")) {
         if (ins.isEmpty()) {
             logic = QStringLiteral("0");
         } else if (model == QLatin1String("XOR")) {
-            logic = QStringLiteral("(%1 ? 1 : 0)").arg(in(ins[0]));
-            for (int i = 1; i < ins.size(); ++i)
-                logic = QStringLiteral("((%1) != (%2 ? 1 : 0) ? 1 : 0)").arg(logic, in(ins[i]));
-        } else {
+            // True when exactly one input is true.
             QStringList terms;
+            for (int i = 0; i < ins.size(); ++i) {
+                QStringList f{smoothIn(ins[i])};
+                for (int j = 0; j < ins.size(); ++j)
+                    if (j != i)
+                        f << QStringLiteral("(1-%1)").arg(smoothIn(ins[j]));
+                terms << f.join('*');
+            }
+            logic = QStringLiteral("(%1)").arg(terms.join('+'));
+        } else if (model == QLatin1String("AND")) {
+            QStringList f;
             for (const QString &n : ins)
-                terms << in(n);
-            logic = QStringLiteral("((%1) ? 1 : 0)").arg(terms.join(model == QLatin1String("AND") ? QStringLiteral(" && ") : QStringLiteral(" || ")));
+                f << smoothIn(n);
+            logic = QStringLiteral("(%1)").arg(f.join('*'));
+        } else {
+            QStringList f;
+            for (const QString &n : ins)
+                f << QStringLiteral("(1-%1)").arg(smoothIn(n));
+            logic = QStringLiteral("(1-%1)").arg(f.join('*'));
         }
     } else if (model == QLatin1String("BUF") || model == QLatin1String("BUF1") || model == QLatin1String("INV")) {
-        logic = ins.isEmpty() ? QStringLiteral("0") : QStringLiteral("(%1 ? 1 : 0)").arg(in(ins[0]));
+        logic = ins.isEmpty() ? QStringLiteral("0") : smoothIn(ins[0]);
         if (model == QLatin1String("INV"))
             logic = QStringLiteral("(1-%1)").arg(logic);
     } else if (model == QLatin1String("SCHMITT") || model == QLatin1String("SCHMTBUF") || model == QLatin1String("SCHMTINV")) {
@@ -1908,7 +1955,7 @@ QStringList NetlistTranslator::translateDigital(const QStringList &t)
             if (!p.contains(k))
                 return def;
             QString v = p.value(k);
-            if (v.startsWith('{') && v.endsWith('}'))
+            if (units::isBraced(v))
                 v = v.mid(1, v.size() - 2);
             return QStringLiteral("{%1}").arg(rewriteExpression(v));
         };
@@ -1957,6 +2004,55 @@ QStringList NetlistTranslator::translateDigital(const QStringList &t)
         const double rclamp = numberOr(p.value(QStringLiteral("rclamp")), 1.0);
         const QString vc = QStringLiteral("abs(V(%1)-V(%2))").arg(inp.isEmpty() ? com : inp, inn.isEmpty() ? com : inn);
         out << QStringLiteral("B%1_var %2 %3 I=sgn(V(%2,%3))*uramp(abs(V(%2,%3))-%4)/%5").arg(name, outN, com, vc).arg(rclamp, 0, 'g', 12);
+        return out;
+    } else if (model == QLatin1String("SAMPLEHOLD")) {
+        // in+ in- CLK S/H . . out com. With S/H connected the output tracks V(in+,in-) while S/H is
+        // high and holds while low; with CLK connected it samples on the rising edge (master-slave).
+        // Each hold capacitor is charged through a gated 10S conductance (1ns tracking time constant).
+        const QString inp = pin(1), inn = pin(2), clk = pin(3), sh = pin(4);
+        if (t[7] == QLatin1String("0") || t[7].startsWith(QLatin1String("NC_"), Qt::CaseInsensitive))
+            return out;
+        const QString outN = nodeToken(t[7]);
+        const QString vin = QStringLiteral("V(%1,%2)").arg(inp.isEmpty() ? com : inp, inn.isEmpty() ? com : inn);
+        auto trackHold = [&](int idx, const QString &gate, const QString &src) {
+            const QString h = internalNode(t[0], idx);
+            out << QStringLiteral("B%1_h%2 %3 %4 I=(%5 ? 10 : 0)*((%6)-V(%4,%3))").arg(name).arg(idx).arg(com, h, gate, src);
+            out << QStringLiteral("C%1_h%2 %3 %4 10n").arg(name).arg(idx).arg(h, com);
+            return QStringLiteral("V(%1,%2)").arg(h, com);
+        };
+        QString value = vin;
+        if (!clk.isEmpty()) {
+            const QString master = trackHold(21, QStringLiteral("!%1").arg(in(clk)), vin);
+            value = trackHold(22, in(clk), master);
+        } else if (!sh.isEmpty()) {
+            value = trackHold(21, in(sh), vin);
+        }
+        out << QStringLiteral("B%1_o %2 %3 V=%4").arg(name, outN, com, value);
+        return out;
+    } else if (model == QLatin1String("MODULATOR")) {
+        // VCO: frequency = space + (mark-space)*V(FM); amplitude V(AM) (1V if unused). The phase,
+        // in cycles, is the voltage of a 1F capacitor charged by a current equal to the frequency.
+        const QString fm = pin(1), am = pin(2);
+        const double mark = numberOr(p.value(QStringLiteral("mark")), 1.0);
+        const double space = numberOr(p.value(QStringLiteral("space")), 0.0);
+        const QString ph = internalNode(t[0], 21);
+        // The phase starts at zero: no charging current during the operating point (time=0).
+        out << QStringLiteral("B%1_ph %2 %3 I=(time>0 ? %4+%5*V(%6,%2) : 0)").arg(name, com, ph).arg(space, 0, 'g', 15).arg(mark - space, 0, 'g', 15).arg(fm.isEmpty() ? com : fm);
+        out << QStringLiteral("C%1_ph %2 %3 1").arg(name, ph, com);
+        // The sine outputs are not integrated states, so the timestep must resolve them explicitly.
+        const double fmax = std::max({std::fabs(mark), std::fabs(space), std::fabs(2 * mark - space)});
+        if (fmax > 0) {
+            const double limit = 1.0 / (50 * fmax);
+            m_deviceMaxStep = m_deviceMaxStep > 0 ? std::min(m_deviceMaxStep, limit) : limit;
+        }
+        const QString amp = am.isEmpty() ? QStringLiteral("1") : QStringLiteral("V(%1,%2)").arg(am, com);
+        auto output = [&](int idx, const char *fn, const char *suffix) {
+            if (t[idx] == QLatin1String("0") || t[idx].startsWith(QLatin1String("NC_"), Qt::CaseInsensitive) || t[idx] == t[8])
+                return;
+            out << QStringLiteral("B%1_%2 %3 %4 V=%5*%6(2*pi*V(%7,%4))").arg(name, QLatin1String(suffix), nodeToken(t[idx]), com, amp, QLatin1String(fn), ph);
+        };
+        output(6, "cos", "cos");
+        output(7, "sin", "sin");
         return out;
     } else {
         m_res.errors << QStringLiteral("Special function %2 is not supported by the ngspice engine (%1)").arg(t[0], model);
@@ -2024,7 +2120,7 @@ QStringList NetlistTranslator::translateSwitch(const QStringList &t)
         return {};
     auto val = [&](const QString &key, const QString &def) {
         QString v = mp.value(key, def);
-        if (v.startsWith('{') && v.endsWith('}'))
+        if (units::isBraced(v))
             v = v.mid(1, v.size() - 2);
         return QStringLiteral("{%1}").arg(rewriteExpression(v)); // braces: numparam evaluates params
     };
@@ -2091,7 +2187,7 @@ QStringList NetlistTranslator::translateIdealDiode(const QStringList &t, const Q
     }
     auto val = [&](const QString &key, const QString &def) {
         QString v = mp.value(key, def);
-        if (v.startsWith('{') && v.endsWith('}'))
+        if (units::isBraced(v))
             v = v.mid(1, v.size() - 2);
         return QStringLiteral("{%1}").arg(rewriteExpression(v));
     };
@@ -2134,7 +2230,7 @@ QStringList NetlistTranslator::laplaceSource(const QString &name, QChar kind, co
                                              const QString &line)
 {
     // Extract the expression after "Laplace=" (up to an LTspice-only option or end of line).
-    static const QRegularExpression re(QStringLiteral("laplace\\s*=\\s*(.*?)(\\s+(window|nfft|mtol)\\s*=.*)?$"),
+    static const QRegularExpression re(QStringLiteral("laplace\\s*=\\s*(.*?)(\\s+(window|nfft|mtol|cache)\\s*=.*)?$"),
                                        QRegularExpression::CaseInsensitiveOption);
     const auto m = re.match(line);
     if (!m.hasMatch()) {
@@ -2142,7 +2238,7 @@ QStringList NetlistTranslator::laplaceSource(const QString &name, QChar kind, co
         return {};
     }
     QString expr = m.captured(1).trimmed();
-    if (expr.startsWith('{') && expr.endsWith('}'))
+    if (units::isBraced(expr))
         expr = expr.mid(1, expr.size() - 2);
     g_params = &m_res.params;
     QString err;
@@ -2178,6 +2274,16 @@ QStringList NetlistTranslator::laplaceSource(const QString &name, QChar kind, co
         u = QStringLiteral("V(%1)").arg(d);
     }
     auto num = [](double v) { return QString::number(v, 'g', 15); };
+    // Fractional-order sections: (1+s/z)/(1+s/p) = p/z + (1-p/z)/(1+s/p), using
+    // a 1-ohm/(1/p)-farad lag per section and a buffer node between sections.
+    for (int k = 0; k < tf->sections.size(); ++k) {
+        const double z = tf->sections[k].first, p = tf->sections[k].second;
+        const QString lag = internalNode(name, 100 + 2 * k), buf = internalNode(name, 101 + 2 * k);
+        out << QStringLiteral("B%1_f%2 0 %3 I=%4-V(%3)").arg(name).arg(k).arg(lag, u);
+        out << QStringLiteral("C%1_f%2 %3 0 %4").arg(name).arg(k).arg(lag, num(1.0 / p));
+        out << QStringLiteral("B%1_g%2 %3 0 V=%4*(%5)+%6*V(%7)").arg(name).arg(k).arg(buf, num(p / z), u, num(1.0 - p / z), lag);
+        u = QStringLiteral("V(%1)").arg(buf);
+    }
     QString yexpr;
     if (n == 0) {
         yexpr = QStringLiteral("%1*(%2)").arg(num(tf->num.value(0) / tf->den[0]), u);
@@ -2226,9 +2332,21 @@ QStringList NetlistTranslator::translateMutual(const QStringList &t)
     if (t.size() < 4)
         return {t.join(' ')};
     const QString coupling = rewriteExpression(t.last());
+    // Schematic inductors are netlisted as "L§T1a" but coupled as "K1 T1a ...".
+    QSet<QString> defined;
+    auto collect = [&defined](const QStringList &lines) {
+        for (const QString &l : lines)
+            if (l.startsWith('L', Qt::CaseInsensitive))
+                defined.insert(l.section(' ', 0, 0).toLower());
+    };
+    collect(m_topElements);
+    for (const Subckt &sc : m_subckts)
+        collect(sc.body);
     QStringList inductors;
-    for (int i = 1; i < t.size() - 1; ++i)
-        inductors << elementName(t[i]);
+    for (int i = 1; i < t.size() - 1; ++i) {
+        const QString prefixed = QStringLiteral("L§") + t[i];
+        inductors << elementName(!defined.contains(t[i].toLower()) && defined.contains(prefixed.toLower()) ? prefixed : t[i]);
+    }
     if (inductors.size() == 2)
         return {QStringLiteral("%1 %2 %3 %4").arg(elementName(t[0]), inductors[0], inductors[1], coupling)};
     QStringList out;
@@ -2275,12 +2393,13 @@ QString NetlistTranslator::translateModel(const QString &lineIn)
     // Model type aliases.
     static const QRegularExpression typeRe(QStringLiteral("^(\\.model\\s+\\S+\\s+)(LPNP)\\b"), QRegularExpression::CaseInsensitiveOption);
     line.replace(typeRe, QStringLiteral("\\1PNP"));
-    // LTspice's VDMOS has no gate-drain capacitance unless given; ngspice's defaults are non-zero.
+    // LTspice's VDMOS has no gate or body-diode capacitance unless given;
+    // ngspice's defaults are non-zero.
     {
         static const QRegularExpression vd(QStringLiteral("^\\.model\\s+\\S+\\s+VDMOS\\b"), QRegularExpression::CaseInsensitiveOption);
         if (vd.match(line).hasMatch()) {
             QStringList add;
-            for (const char *k : {"cgdmax", "cgdmin", "cgs"})
+            for (const char *k : {"cgdmax", "cgdmin", "cgs", "cjo"})
                 if (!line.contains(QRegularExpression(QStringLiteral("\\b%1\\s*=").arg(QLatin1String(k)), QRegularExpression::CaseInsensitiveOption)))
                     add << QStringLiteral("%1=0").arg(QLatin1String(k));
             if (!add.isEmpty()) {
@@ -2291,8 +2410,28 @@ QString NetlistTranslator::translateModel(const QString &lineIn)
             }
         }
     }
+    // A diode with Is=0 conducts no forward current in LTspice; ngspice clamps Is to 1e-28, which still
+    // conducts at ~1.5V. Keep the clamp but make the exponential negligible with a huge emission coefficient.
+    {
+        static const QRegularExpression dm(QStringLiteral("^\\.model\\s+\\S+\\s+D\\b"), QRegularExpression::CaseInsensitiveOption);
+        static const QRegularExpression is0(QStringLiteral("\\bis\\s*=\\s*0+\\.?0*(?=[\\s)]|$)"), QRegularExpression::CaseInsensitiveOption);
+        static const QRegularExpression nParam(QStringLiteral("\\s*\\bn\\s*=\\s*[^\\s)]+"), QRegularExpression::CaseInsensitiveOption);
+        if (dm.match(line).hasMatch() && is0.match(line).hasMatch()) {
+            line.replace(nParam, QString());
+            line.replace(is0, QStringLiteral("is=1e-28 n=1000"));
+        }
+        // LTspice's default breakdown current is 1e-10 (SPICE3/ngspice: 1e-3), which sets where a zener sits.
+        static const QRegularExpression bv(QStringLiteral("\\bbv\\s*="), QRegularExpression::CaseInsensitiveOption);
+        static const QRegularExpression ibv(QStringLiteral("\\bibv\\s*="), QRegularExpression::CaseInsensitiveOption);
+        if (dm.match(line).hasMatch() && bv.match(line).hasMatch() && !ibv.match(line).hasMatch()) {
+            if (line.contains(')'))
+                line.insert(line.lastIndexOf(')'), QStringLiteral(" ibv=1e-10"));
+            else
+                line += QStringLiteral(" ibv=1e-10");
+        }
+    }
     // Step overrides of model parameters.
-    const QStringList mt = line.split(QRegularExpression(QStringLiteral("\\s+")), Qt::SkipEmptyParts);
+    const QStringList mt =line.split(QRegularExpression(QStringLiteral("\\s+")), Qt::SkipEmptyParts);
     if (mt.size() > 1) {
         const QStringList ov = m_stepModelOverrides.value(mt[1].toLower());
         for (const QString &kv : ov) {
@@ -2341,6 +2480,8 @@ QString NetlistTranslator::translateAnalysis(const QString &line)
         }
         if (tmax <= 0 && m_tranMaxStep > 0)
             tmax = m_tranMaxStep;
+        if (m_deviceMaxStep > 0 && (tmax <= 0 || m_deviceMaxStep < tmax))
+            tmax = m_deviceMaxStep;
         if (tstep <= 0)
             tstep = (tstop - tstart) / 1000.0;
         QString out = QStringLiteral(".tran %1 %2").arg(tstep, 0, 'g', 12).arg(tstop, 0, 'g', 12);
@@ -2535,4 +2676,131 @@ void NetlistTranslator::disambiguateModels(QStringList &out)
             }
         }
     }
+}
+
+QStringList NetlistTranslator::floatingNodeShunts(const QStringList &elements)
+{
+    QHash<QString, QString> parent;
+    std::function<QString(const QString &)> find = [&](const QString &n) -> QString {
+        QString p = parent.value(n, n);
+        if (p == n)
+            return n;
+        p = find(p);
+        parent[n] = p;
+        return p;
+    };
+    auto join = [&](const QString &a, const QString &b) {
+        const QString ra = find(a), rb = find(b);
+        if (ra != rb)
+            parent[ra] = rb;
+    };
+    QStringList order; // nodes in first-seen order, for deterministic output
+    auto see = [&](const QString &n) {
+        if (!parent.contains(n)) {
+            parent.insert(n, n);
+            order << n;
+        }
+    };
+    auto node = [](const QStringList &t, int i) { return t[i].toLower() == QLatin1String("gnd") ? QStringLiteral("0") : t[i].toLower(); };
+    see(QStringLiteral("0"));
+    for (const QString &l : elements) {
+        const QStringList t = tokenize(l);
+        if (t.isEmpty() || l.startsWith('*') || l.startsWith('.'))
+            continue;
+        const QChar k = t[0][0].toUpper();
+        auto nodes = [&](int n) {
+            QStringList r;
+            for (int i = 1; i <= n && i < t.size(); ++i) {
+                r << node(t, i);
+                see(r.last());
+            }
+            return r;
+        };
+        auto chain = [&](const QStringList &ns) {
+            for (int i = 1; i < ns.size(); ++i)
+                join(ns[0], ns[i]);
+        };
+        switch (k.unicode()) {
+        case 'C':
+        case 'I':
+        case 'G':
+        case 'F':
+            nodes(2); // no DC path between the terminals
+            break;
+        case 'B':
+            if (l.contains(QRegularExpression(QStringLiteral("^\\S+\\s+\\S+\\s+\\S+\\s+I\\s*="), QRegularExpression::CaseInsensitiveOption)))
+                nodes(2);
+            else
+                chain(nodes(2));
+            break;
+        case 'R':
+        case 'L':
+        case 'V':
+        case 'D':
+        case 'E':
+        case 'H':
+        case 'W':
+            chain(nodes(2));
+            break;
+        case 'Q':
+        case 'J':
+            chain(nodes(3));
+            break;
+        case 'M': {
+            const QStringList ns = nodes(3);
+            if (ns.size() == 3)
+                join(ns[0], ns[2]);
+            break;
+        }
+        case 'S':
+            chain(nodes(2));
+            nodes(4);
+            break;
+        case 'T': {
+            const QStringList ns = nodes(4);
+            if (ns.size() == 4) {
+                join(ns[0], ns[2]);
+                join(ns[1], ns[3]);
+            }
+            break;
+        }
+        case 'X': {
+            // Pins are the tokens before the subcircuit name; treat the subcircuit as conducting between all of them.
+            int last = t.size();
+            for (int i = 1; i < t.size(); ++i)
+                if (t[i].contains('=') || t[i].compare(QLatin1String("params:"), Qt::CaseInsensitive) == 0) {
+                    last = i;
+                    break;
+                }
+            QStringList ns = nodes(last - 2);
+            chain(ns);
+            break;
+        }
+        case 'K':
+            break;
+        default:
+            // Unknown devices (XSPICE A-elements etc.): assume every node they touch is DC-tied to ground.
+            for (int i = 1; i < t.size(); ++i) {
+                QString n = t[i].toLower();
+                n.remove('[').remove(']').remove('%');
+                if (n.isEmpty() || n.contains('=') || n.contains('('))
+                    continue;
+                see(n);
+                join(n, QStringLiteral("0"));
+            }
+            break;
+        }
+    }
+    QStringList out;
+    QSet<QString> done;
+    const QString ground = find(QStringLiteral("0"));
+    int idx = 0;
+    for (const QString &n : order) {
+        const QString r = find(n);
+        if (r == ground || done.contains(r))
+            continue;
+        done.insert(r);
+        out << QStringLiteral("R__dcpath%1 %2 0 1T").arg(++idx).arg(n);
+    }
+    return out;
 }

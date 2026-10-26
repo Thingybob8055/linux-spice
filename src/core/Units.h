@@ -23,4 +23,8 @@ QString formatSpice(double value, int significant = 6);
 // horizontal distance: "dx=1ms (1KHz)".
 QString formatDelta(double dx, const QString &unit);
 
+// True when `s` is one {...} group: it starts with '{' and that brace's
+// match is the final character ("{a}*{b}" is not braced).
+bool isBraced(const QString &s);
+
 } // namespace units

@@ -72,7 +72,7 @@ QString Netlister::spiceNameFor(const SymbolInstance &s)
     return QString(letter) + QStringLiteral("§") + inst;
 }
 
-bool Netlister::isHierarchicalBlock(const SymbolInstance &s, const QString &schDir, QString *ascPath)
+bool Netlister::isHierarchicalBlock(const SymbolInstance &s, const QString &schDir, QString *ascPath, const QString &selfPath)
 {
     if (!s.def)
         return false;
@@ -86,10 +86,15 @@ bool Netlister::isHierarchicalBlock(const SymbolInstance &s, const QString &schD
     QStringList dirs;
     if (!s.def->filePath.startsWith(':'))
         dirs << QFileInfo(s.def->filePath).absolutePath();
-    if (!schDir.isEmpty())
+    // A library symbol is not a block just because the schematic's folder holds a
+    // same-named .asc (e.g. Educational/logamp.asc beside opamp.asc); only block symbols look there.
+    if (!schDir.isEmpty() && s.def->type == SymbolDef::Type::Block)
         dirs << schDir;
     for (const QString &d : dirs) {
         const QString f = DirCache::match(d, base + QStringLiteral(".asc"));
+        if (!f.isEmpty() && !selfPath.isEmpty()
+            && QFileInfo(d + '/' + f).canonicalFilePath() == QFileInfo(selfPath).canonicalFilePath())
+            continue;
         if (!f.isEmpty()) {
             if (ascPath)
                 *ascPath = d + '/' + f;
@@ -365,7 +370,7 @@ QStringList Netlister::sheetBody(const Schematic &sch, const Connectivity &conn,
         if (isJumper(s))
             continue; // merged into one net by connectivity()
         QString ascPath;
-        const bool hier = isHierarchicalBlock(s, schDir, &ascPath);
+        const bool hier = isHierarchicalBlock(s, schDir, &ascPath, sch.filePath);
         QString prefix = s.attr(QStringLiteral("Prefix")).trimmed();
         if (prefix.isEmpty() && !hier)
             continue; // purely graphical symbol

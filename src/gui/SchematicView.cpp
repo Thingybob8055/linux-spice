@@ -1792,7 +1792,7 @@ void SchematicView::editSymbol(int index, bool superExpert)
     SymbolInstance s = m_sch.symbols[index];
     QString ascPath;
     // Hierarchical blocks open their sub-sheet.
-    if (!superExpert && Netlister::isHierarchicalBlock(s, m_sch.directory(), &ascPath)) {
+    if (!superExpert && Netlister::isHierarchicalBlock(s, m_sch.directory(), &ascPath, m_sch.filePath)) {
         QMenu menu(this);
         QAction *open = menu.addAction(tr("Open hierarchical sheet"));
         QAction *attrs = menu.addAction(tr("Edit instance attributes..."));
