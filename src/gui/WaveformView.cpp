@@ -800,6 +800,13 @@ bool WaveformView::savePlotSettings(const QString &path)
         ps.y[0].min = p->yLeft.min;
         ps.y[0].max = p->yLeft.max;
         ps.y[0].log = p->yLeft.log;
+        if (m_data->complex && p->acMode == WaveformPane::AcMode::Bode) {
+            // LTspice stores a dB axis as linear magnitudes.
+            ps.yMode = 2;
+            ps.y[0].min = std::pow(10.0, p->yLeft.min / 20);
+            ps.y[0].max = std::pow(10.0, p->yLeft.max / 20);
+            ps.y[0].log = false;
+        }
         if (p->hasRightAxis()) {
             ps.y[1].valid = true;
             ps.y[1].min = p->yRight.min;
@@ -841,8 +848,14 @@ bool WaveformView::loadPlotSettings(const QString &path)
         pane->showPhase = ps.plotPhase;
         pane->recompute();
         if (ps.y[0].valid && ps.y[0].max > ps.y[0].min) {
-            pane->yLeft.min = ps.y[0].min;
-            pane->yLeft.max = ps.y[0].max;
+            double lo = ps.y[0].min, hi = ps.y[0].max;
+            // A Bode magnitude axis is drawn in dB; the file holds linear magnitudes.
+            if (ps.yMode == 2 && m_data->complex && lo > 0) {
+                lo = 20 * std::log10(lo);
+                hi = 20 * std::log10(hi);
+            }
+            pane->yLeft.min = lo;
+            pane->yLeft.max = hi;
             pane->yLeft.autoRange = false;
         }
         if (ps.y[1].valid && ps.y[1].max > ps.y[1].min) {

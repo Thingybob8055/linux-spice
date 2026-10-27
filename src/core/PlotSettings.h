@@ -27,6 +27,9 @@ struct PlotPaneSettings {
     PlotAxis y[3];
     bool gridOn = true;
     bool plotMag = true, plotPhase = true, plotGroupDelay = false;
+    // Left y axis mode from "Log: x y ...": 0 linear, 1 logarithmic, 2 dB. In dB mode LTspice
+    // stores the axis limits as linear magnitudes (0.0224..1 means -33..0 dB).
+    int yMode = 0;
     QString rawText; // original text of the pane block
 };
 

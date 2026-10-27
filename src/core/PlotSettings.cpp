@@ -100,8 +100,8 @@ bool PlotSettingsFile::load(const QString &path, QString *error)
         } else if (l.startsWith(QLatin1String("Log:"))) {
             const QStringList t = l.mid(4).split(' ', Qt::SkipEmptyParts);
             pane->x.log = t.value(0).toInt() != 0;
-            if (t.size() > 1)
-                pane->y[0].log = t.value(1).toInt() == 1 || t.value(1).toInt() == 2;
+            pane->yMode = t.value(1).toInt();
+            pane->y[0].log = pane->yMode == 1;
         } else if (l.startsWith(QLatin1String("GridStyle:"))) {
             pane->gridOn = l.mid(10).trimmed().toInt() != 0;
         } else if (l.startsWith(QLatin1String("PltMag:"))) {
@@ -132,7 +132,7 @@ bool PlotSettingsFile::save(const QString &path, QString *error) const
             for (int i = 0; i < 3; ++i)
                 if (p.y[i].valid)
                     out << QStringLiteral("      Y[%1]: %2").arg(i).arg(axisText(p.y[i]));
-            out << QStringLiteral("      Log: %1 %2 0").arg(p.x.log ? 1 : 0).arg(p.y[0].log ? 2 : 0);
+            out << QStringLiteral("      Log: %1 %2 0").arg(p.x.log ? 1 : 0).arg(p.yMode != 0 ? p.yMode : (p.y[0].log ? 1 : 0));
             out << QStringLiteral("      GridStyle: %1").arg(p.gridOn ? 1 : 0);
             if (s.analysis.contains(QLatin1String("AC"), Qt::CaseInsensitive)) {
                 out << QStringLiteral("      PltMag: %1").arg(p.plotMag ? 1 : 0);

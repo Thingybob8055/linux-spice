@@ -55,6 +55,11 @@ Ticks logTicks(double lo, double hi)
     const int d0 = int(std::floor(std::log10(lo)));
     const int d1 = int(std::ceil(std::log10(hi)));
     const int decades = d1 - d0;
+    if (hi / lo < 10) {
+        // Less than a decade: linearly spaced values (positioned logarithmically).
+        Ticks lin = linearTicks(lo, hi, 10);
+        return lin;
+    }
     const int every = decades > 12 ? int(std::ceil(decades / 12.0)) : 1;
     for (int d = d0; d <= d1; ++d) {
         const double base = std::pow(10.0, d);
@@ -557,8 +562,15 @@ void WaveformPane::drawTraces(QPainter &p, const QRectF &pr)
                     return pr.left() + (x - nyqX.min) / (nyqX.max - nyqX.min) * pr.width();
                 return xToPixel(x);
             };
+            // A single trace over several steps: each step gets its own palette color (as LTspice).
+            QColor stepColor = t.color;
+            if (traces.size() == 1 && t.x.size() > 1) {
+                const QList<QColor> pal = AppSettings::instance().traceColors();
+                if (!pal.isEmpty())
+                    stepColor = pal[r % pal.size()];
+            }
             auto drawSeries = [&](const QVector<double> &yv, bool right, Qt::PenStyle style) {
-                QPen pen(t.color, thick ? 2.2 : 1.2, style);
+                QPen pen(stepColor, thick ? 2.2 : 1.2, style);
                 p.setPen(pen);
                 const int n = std::min(xs.size(), yv.size());
                 if (n == 0)
