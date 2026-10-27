@@ -58,23 +58,48 @@ Devices beyond plain SPICE: LTspice's ideal diode and smooth/level-2 switches, b
 
 Waveform viewer: multiple panes, Bode/Nyquist/Cartesian AC display, expressions with units, cursors, FFT, zoom and pan, `.plt` files, LTspice-compatible `.raw` output.
 
-## Accuracy
+## Compatibility with LTspice
 
-Simulation results are checked against LTspice by running the same examples in both and comparing waveforms (`tools/compare_raw.py`). Of the 80 runnable examples in LTspice's `Educational` folder, 59 match within 1% normalized RMS error and 67 within 5%. LinSpice uses LTspice's documented integration defaults (trapezoidal, `trtol=2`, maximum step Tstop/1024), so free-running oscillators reproduce LTspice's frequency, including its own numerical frequency shift: most LC, RC and multivibrator examples agree within 0.05% and amplitude within 1%. Waveforms of oscillators still separate slowly over hundreds of cycles, because LTspice's own edge timing jitters by about 1% from cycle to cycle and no two simulators reproduce that exactly.
+LinSpice is checked against LTspice by running the same circuits in both (LTspice under Wine) and comparing the results signal by signal (`tools/compare_raw.py`). The figures below come from LTspice 26.1's `Educational` examples and from purpose-built test circuits.
 
-The results contain the same probeable signals as LTspice's, under the same names: node voltages, device and terminal currents (`I(R1)`, `Ic(Q1)`, `Id(M1)`), subcircuit pin currents (`Ix(U1:pin)`, named after the subcircuit's ports), special-function pin currents (`I7(A1)`), inductor flux (`L1:flux`), currents in `.ac` analyses, and every device's noise contribution in `.noise` (`V(R1)`, `V(Q1.rb)`, `gain`). A component's current includes its `Rpar`/`Cpar`, as in LTspice. A stepped `.op` or single-frequency `.noise` is one trace against the stepped value. LinSpice additionally keeps subcircuit-internal signals for probing inside the hierarchy.
+### Summary
 
-Known gaps:
+Of the 82 `Educational` examples, 80 run in LinSpice. Of those, 59 match LTspice within 1% normalized RMS error over every saved signal, and 67 within 5%. Most of the rest are free-running oscillators, whose waveforms slowly drift apart in time while their frequency and amplitude still match (see below). The two that don't run use an encrypted vendor model (`Royer`) and the hysteretic core inductor (`NonLinearTransformer`).
 
-- Transmission line terminal currents other than `Ia` are not available (ngspice's line model doesn't have them).
-- For a Laplace current source LTspice's `I(G1)` can differ from the current it actually delivers (it violates KCL in the `HalfSlope` example); LinSpice reports the delivered current.
+### Matches LTspice
 
-- The hysteretic core inductor model (`Hc=`, `Br=`, `Bs=`) is treated as a linear inductor.
-- `.machine` state machines, `.savestate`/`.loadstate` and `.savebias` are not supported.
-- IGBT switching transients are approximate (terminal currents within a few percent of LTspice through switching; static characteristics within 1%). The IGBT's internal sub-device currents (`Id(m1:Z1)`, `I(cdg:Z1)`) are not available.
-- ngspice is slower than LTspice on some large behavioral circuits.
-- A few switching oscillators built from transistor-level or op-amp macromodels (`relax`, `NE555`, `colpits2`) run 0.4–0.8% slow: LTspice cuts its time step much harder at their switching edges than ngspice does.
-- In the `dimmer` example the triac occasionally fails to latch at a zero crossing under trapezoidal integration, where LTspice's "modified trapezoidal" method (not available in ngspice) keeps it firing.
+| Area | What was checked |
+|---|---|
+| Files | `.asc`, `.asy`, `.net` and `.plt` open as in LTspice. `.raw` output uses LTspice's layout, plot names and signal names. Saved plot settings (panes, traces, axes, dB/log scales) are applied when a simulation finishes. |
+| Integration defaults | Trapezoidal, `trtol=2`, maximum step Tstop/1024, as LTspice documents and as its own time steps show. |
+| Signals you can probe | Every signal LTspice saves exists under the same name. This covers node voltages, device and terminal currents (`I(R1)`, `Ic(Q1)`, `Id(M1)`), subcircuit pin currents (`Ix(u1:3)`, named after the subcircuit's ports), special-function pin currents (`I1`…`I8(A1)`), IGBT terminal currents, inductor flux (`L1:flux`), currents in `.ac` analyses, and in `.noise` every device's contribution (`V(R1)`, `V(Q1.rb)`, …) plus `gain`. A component's current includes its `Rpar`/`Cpar`, as in LTspice. Non-zero currents agree with LTspice's within the same tolerance as the voltages. |
+| Click-to-probe | Clicking any pin, part or wire in the schematic plots the same signal LTspice would. In a noise analysis, clicking a part plots its noise contribution. All 3,956 pin and net probes in the 80 runnable examples resolve. |
+| Noise | Every per-device noise contribution in the `noise` and `NoiseFigure` examples is within 0.1 dB of LTspice. A stepped single-frequency `.noise` or stepped `.op` becomes one trace against the stepped value, as in LTspice. |
+| Laplace sources | Rational transfer functions, `exp(-s*T)` delays and fractional powers such as `1/sqrt(1+s*tau)`. Fractional powers are within 0.004 dB and 0.014° of the exact response. In the time domain this is closer to exact than LTspice: in `HalfSlope`'s tail, LTspice is 4–19% off the exact answer and LinSpice is within 1%. |
+| IGBT | Hefner's published model (the one LTspice uses), checked against LTspice with six parameter sets and two load types. DC curves are within 0.03%, on-state voltage within 0.15%, and switching delays, rise and fall times within 2%. |
+| Oscillators | LC, RC and multivibrator examples oscillate at LTspice's frequency within 0.05% (including LTspice's own numerical frequency shift), with amplitude within 1%. |
+| Other features | `.step` (all forms), Monte Carlo functions, `.meas`, `.four`, `.wave`, `wavefile=` sources (`wavein` matches exactly), `.fra` (within 0.3 dB in `fra_eg1`), `.net` two-port parameters, and LTspice's default component values and model defaults where they differ from ngspice's. |
+
+### Differs from LTspice
+
+- **Oscillator waveforms drift apart over time.** Frequency and amplitude match, but over hundreds of cycles the waveforms separate in time. LTspice's own edge timing varies by about 1% from cycle to cycle, and no two simulators reproduce that exactly. Compare oscillators by frequency and amplitude, not by overlaying late waveforms. This accounts for most of the examples outside 1%: `colpits2`, `Pierce`, `Clapp`, `relax`, `NE555`, `astable`, `phaseshift`, `Hartly`, `MC1648`, `colpits`, `phaseshift2`, the parametric oscillators `P2` and `Electrometer`, and the PLL-based `PLL` and `PLL2`.
+- **Some switching oscillators run slightly slow.** `relax`, `NE555` and `colpits2` (built from transistor-level or op-amp macromodels) run 0.4–0.8% slow, because LTspice cuts its time step harder at their switching edges. Adding `.options xmu=0.45` to such a schematic brings `relax` and `NE555` within about 0.1% (see the next item for when not to use it).
+- **Integration ringing.** With trapezoidal integration, currents in capacitors and diodes often alternate in sign from one time step to the next after a sharp edge. LTspice's results show this too, in the same examples and usually with similar amplitude. Its "modified trapezoidal" method, which ngspice doesn't have, damps it more in some cases, such as a hard-switched diode's reverse recovery (±0.19 A here vs ±0.008 A in LTspice in one test). Node voltages are unaffected. For switching and power circuits, `.options xmu=0.45` damps the ringing; it also makes the `dimmer` example's triac latch reliably and match LTspice. Don't use it on LC or linear oscillators, which it damps out.
+- **`dimmer`:** without that option, the triac occasionally fails to latch at a zero crossing.
+- **Monte Carlo** (`MonteCarlo` example): `mc()`, `gauss()` and `flat()` behave as documented and are reproducible, but they draw different random numbers from LTspice's, so individual runs differ.
+- **Small residual differences:** `ISO16750-2_example`, `ISO7637-2_example`, `160` and `2ndOrderNotch` (at the bottom of the notch) are within 1.3–3.5%.
+- **Laplace current source current:** LTspice's `I(G1)` can differ from the current the source actually delivers. In `HalfSlope` it violates Kirchhoff's current law. LinSpice reports the delivered current.
+- **Extra signals.** LinSpice also saves subcircuit-internal signals (for probing inside the hierarchy) and the currents of ideal op-amp input pins (zero), which LTspice omits. It ignores `.save` and saves everything.
+- **Currents that are effectively zero** (picoamps and below) differ by roundoff.
+- **Speed.** ngspice is slower than LTspice on some large behavioral circuits and on IGBT DC sweeps.
+
+### Not supported
+
+- **Encrypted models.** Analog Devices distributes some models encrypted, and ngspice can't simulate them; LinSpice reports them by name. Unencrypted models, including third-party ones, work.
+- **Hysteretic core inductors** (`Hc=`, `Br=`, `Bs=`) are simulated as linear inductors.
+- **Transmission line terminal currents** other than `Ia(T1)` aren't available, because ngspice's line model doesn't have them.
+- **IGBT internal sub-device currents** (`Id(m1:Z1)`, `I(cdg:Z1)`) aren't available; the terminal currents are.
+- `.machine` state machines, `.savestate`/`.loadstate` and `.savebias`.
 
 ## Development
 
@@ -84,6 +109,7 @@ QT_QPA_PLATFORM=offscreen build/gui_tests                  # GUI interaction tes
 build/core_tests --corpus <examples-dir> --translate       # parse, netlist and translate every example
 build/core_tests --netlist file.asc                        # show the LTspice and ngspice netlists
 python3 tools/compare_raw.py reference.raw result.raw      # compare two waveform files
+linspice --probe-audit file.asc                            # simulate, then check every schematic probe resolves
 ```
 
 Source layout:

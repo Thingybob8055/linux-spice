@@ -177,6 +177,39 @@ private slots:
         QCOMPARE(v.schematic().symbols.size(), 4);
     }
 
+    // A noise result picks up the example's .plt (LTspice names the section after its own plot
+    // name, which differs from ngspice's): the saved trace must be shown.
+    void noisePlotSettings()
+    {
+        QTemporaryDir dir;
+        const QString plt = dir.filePath(QStringLiteral("noise.plt"));
+        {
+            QFile f(plt);
+            QVERIFY(f.open(QIODevice::WriteOnly));
+            f.write("[Noise Spectral Density - (V/Hz\xbd or A/Hz\xbd)]\r\n{\r\n   Npanes: 1\r\n   {\r\n"
+                    "      traces: 1 {268959746,0,\"V(onoise)\"}\r\n      X: ('K',1,1,0,20000)\r\n"
+                    "      Y[0]: ('n',1,1.944e-007,8e-010,2.032e-007)\r\n      Y[1]: ('_',0,1e+308,0,-1e+308)\r\n"
+                    "      Log: 1 0 0\r\n   }\r\n}\r\n");
+        }
+        for (const QString &plotName : {QStringLiteral("Noise Spectral Density - (V/Hz\u00bd or A/Hz\u00bd)"), QStringLiteral("Noise Spectral Density Curves")}) {
+            auto ds = DatasetPtr::create();
+            ds->plotName = plotName;
+            ds->kind = Dataset::Kind::Noise;
+            ds->logScaleX = true;
+            ds->vars = {{QStringLiteral("frequency"), QStringLiteral("frequency")}, {QStringLiteral("V(onoise)"), QStringLiteral("voltage-density")}};
+            Dataset::Run run;
+            run.re = {{1, 10, 100, 1000, 10000}, {2.03e-7, 2.03e-7, 2.03e-7, 2.02e-7, 1.95e-7}};
+            ds->runs = {run};
+            ds->rebuildIndex();
+            WaveformView v;
+            v.setDataset(ds);
+            QVERIFY2(v.loadPlotSettings(plt), qPrintable(plotName));
+            QCOMPARE(v.panes().size(), 1);
+            QCOMPARE(v.panes()[0]->traces.size(), 1);
+            QVERIFY(v.panes()[0]->traces[0].error.isEmpty());
+        }
+    }
+
     void waveformTracesAndCursors()
     {
         auto ds = DatasetPtr::create();

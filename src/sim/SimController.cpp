@@ -368,7 +368,7 @@ QString SimController::ltName(const QString &ngNameIn, const TranslationResult &
             if (parts.size() >= 3 && parts[0].size() == 1)
                 parts.removeFirst();
             const QString leaf = parts.takeLast();
-            return parts.join(':') + ':' + tr.elementNames.value(leaf.toLower(), leaf);
+            return parts.join(':') + ':' + tr.elementNames.value(leaf.toLower(), leaf).section(QChar(0xA7), -1);
         }
         QString orig = tr.elementNames.value(s.toLower(), s);
         // "M§Q1": a MOSFET whose instance name doesn't start with M; LTspice shows "Q1".
@@ -548,6 +548,8 @@ void SimController::assemble()
     result.aborted = m_aborted;
     result.analysis = m_translations.isEmpty() ? QString() : m_translations[0].analysis;
     result.stepLabels = m_stepLabels;
+    if (!m_translations.isEmpty())
+        result.pinProbes = m_translations[0].pinProbes;
     QString log = m_preLog;
 
     DatasetPtr merged;
@@ -591,6 +593,9 @@ void SimController::assemble()
         Dataset renamed;
         renamed.title = main->title;
         renamed.plotName = main->plotName;
+        // LTspice's name for the noise spectrum; .plt files key their sections by it.
+        if (main->kind == Dataset::Kind::Noise && !main->vars.isEmpty() && main->vars[0].name.compare(QLatin1String("frequency"), Qt::CaseInsensitive) == 0)
+            renamed.plotName = QStringLiteral("Noise Spectral Density - (V/Hz\u00bd or A/Hz\u00bd)");
         renamed.date = main->date;
         renamed.kind = main->kind;
         renamed.complex = main->complex;

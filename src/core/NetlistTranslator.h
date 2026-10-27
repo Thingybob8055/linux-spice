@@ -31,6 +31,9 @@ struct TranslationResult {
     QSet<QString> noSubstrateBjts; // lower-case LTspice names
     // Pin current sense sources of subcircuit instances: lower-case source name -> "Ix(u1:pin)".
     QHash<QString, QString> pinCurrents;
+    // Click-probe lookup: "<instance>:<netlist pin number>" (lower case, as LTspice shows the
+    // instance: "u1:3", "a1:7", "z1:1") -> the current's vector name.
+    QHash<QString, QString> pinProbes;
     // Pin currents computed after the run: name -> pin currents whose negated sum it is
     // (empty: identically zero), e.g. "I8(A1)" -> {"I6(A1)", "I7(A1)"}.
     QList<QPair<QString, QStringList>> derivedCurrents;

@@ -1264,7 +1264,9 @@ QStringList NetlistTranslator::translateElement(const QString &rawLine, bool top
             const QString inner = internalNode(t[0], 200 + i);
             const QString src = QStringLiteral("Vlspin_%1_%2").arg(inst).arg(i);
             senseLines << QStringLiteral("%1 %2 %3 0").arg(src, nodeToken(t[i]), inner);
-            m_res.pinCurrents.insert(src.toLower(), QStringLiteral("Ix(%1:%2)").arg(shown.toLower(), ports.value(i - 1, QString::number(i)).toLower()));
+            const QString label = QStringLiteral("Ix(%1:%2)").arg(shown.toLower(), ports.value(i - 1, QString::number(i)).toLower());
+            m_res.pinCurrents.insert(src.toLower(), label);
+            m_res.pinProbes.insert(QStringLiteral("%1:%2").arg(shown.toLower()).arg(i), label);
             t[i] = inner;
         }
         line = t.join(' ');
@@ -1282,6 +1284,7 @@ QStringList NetlistTranslator::translateElement(const QString &rawLine, bool top
                 const QString src = QStringLiteral("Vlspin_%1_%2").arg(inst).arg(i);
                 senseLines << QStringLiteral("%1 %2 %3 0").arg(src, nodeToken(t[i]), inner);
                 m_res.pinCurrents.insert(src.toLower(), QStringLiteral("I%1(%2)").arg(QLatin1Char(terms[i - 1])).arg(shown));
+                m_res.pinProbes.insert(QStringLiteral("%1:%2").arg(shown.toLower()).arg(i), m_res.pinCurrents.value(src.toLower()));
                 t[i] = inner;
             }
             line = t.join(' ');
@@ -1295,6 +1298,8 @@ QStringList NetlistTranslator::translateElement(const QString &rawLine, bool top
             shown = shown.mid(sect + 1);
         const QString inst = elementName(t[0]).toLower();
         auto label = [&](int pin) { return QStringLiteral("I%1(%2)").arg(pin).arg(shown); };
+        for (int pin : {1, 2, 6, 7, 8})
+            m_res.pinProbes.insert(QStringLiteral("%1:%2").arg(shown.toLower()).arg(pin), label(pin));
         m_res.derivedCurrents.append({label(1), {}});
         m_res.derivedCurrents.append({label(2), {}});
         QStringList outs;
@@ -3177,7 +3182,7 @@ QStringList NetlistTranslator::translateIgbt(const QStringList &t, const QString
                               {QStringLiteral("kp"), 0.38}, {QStringLiteral("mun"), 1500}, {QStringLiteral("mup"), 450},
                               {QStringLiteral("nb"), 2e14}, {QStringLiteral("tau"), 7.1e-6}, {QStringLiteral("theta"), 0.02},
                               {QStringLiteral("vt"), 4.7}, {QStringLiteral("vtd"), 1e-3}, {QStringLiteral("wb"), 9e-5},
-                              {QStringLiteral("subthres"), 0.02}};
+                              {QStringLiteral("subthres"), 0.02}, {QStringLiteral("bvf"), 1.0}, {QStringLiteral("bvn"), 4.0}};
     {
         QString body = modelLine;
         const int open = body.indexOf('(');
@@ -3218,7 +3223,9 @@ QStringList NetlistTranslator::translateIgbt(const QStringList &t, const QString
 
     const QString name = elementName(t[0]);
     const QString c = nodeToken(t[1]), g = nodeToken(t[2]), e = nodeToken(t[3]);
-    const QString a = internalNode(t[0], 81), d = internalNode(t[0], 82), nvae = internalNode(t[0], 83);
+    // Internal nodes as in Hefner & Diebolt (IEEE Trans. Power Electron. 9(5), 1994, Fig. 6):
+    // "emitter" (em, inside the base resistance) and "drain" (d, the PNP base / MOSFET drain).
+    const QString em = internalNode(t[0], 81), d = internalNode(t[0], 82), ebs = internalNode(t[0], 83);
     // Helper nodes hold shared subexpressions (ngspice differentiates each behavioral expression
     // symbolically, so repeating them makes every evaluation far slower).
     const QString nvgt = internalNode(t[0], 84), nim = internalNode(t[0], 85), nw = internalNode(t[0], 86), nq = internalNode(t[0], 87);
@@ -3233,9 +3240,11 @@ QStringList NetlistTranslator::translateIgbt(const QStringList &t, const QString
     const QString qq = QStringLiteral("(0.5*(V(%1)+sqrt(V(%1)*V(%1)+1e-30))*1e-6)").arg(nq);
     const double sub = std::max(mp["subthres"], 1e-4);
     QStringList out;
-    // Base width W = WB minus the base-collector depletion width (kept above 1% of WB).
-    out << QStringLiteral("B%1_w %2 0 V=1e4*max(%3-%4*sqrt(%5),%6)").arg(name, nw, num(wb), num(kdep), pos(vds + QStringLiteral("+0.6")), num(wb * 0.01));
-    // Softplus threshold (subthreshold conduction), written so exp() never sees a large argument.
+    // Base width W = WB - Wbcj, Wbcj = sqrt(2*eps*(Vbc+0.6)/(q*NB)) with Vbc = Vds (kept above 1% of WB).
+    const QString vdsPos = pos(vds + QStringLiteral("+0.6"));
+    out << QStringLiteral("B%1_w %2 0 V=1e4*max(%3-%4*sqrt(%5),%6)").arg(name, nw, num(wb), num(kdep), vdsPos, num(wb * 0.01));
+    // MOSFET channel current Imos (Kplin = KF*KP, Kpsat = KP), with a softplus threshold
+    // (subthreshold conduction) written so exp() never sees a large argument.
     const QString y = QStringLiteral("(%1-%2)").arg(vgs, num(mp["vt"]));
     out << QStringLiteral("B%1_vgt %2 0 V=max(%4,0)+%3*ln(1+exp(-abs(%4)/%3))").arg(name, nvgt, num(sub), y);
     const QString vgt = QStringLiteral("V(%1)").arg(nvgt);
@@ -3243,40 +3252,98 @@ QStringList NetlistTranslator::translateIgbt(const QStringList &t, const QString
     const QString kf = num(mp["kf"]), kp = num(mp["kp"]);
     out << QStringLiteral("B%1_im %2 0 V=(%3>=%4/%5 ? %6*%4*%4/2/%7 : %5*%6*(%4*%3-%5*%3*%3/2)/%7)").arg(name, nim, vds, vgt, kf, kp, den);
     const QString imos = QStringLiteral("V(%1)").arg(nim);
-    out << QStringLiteral("B%1_mos %2 %3 I=%4*%5").arg(name, d, e, sg, imos);
-    // Base charge Q and anode junction voltage Vae: p0*(p0+NB) = ni^2*exp(Vae/Vt),
-    // Q = q*A*L*p0*tanh(W/(2L)), dQ/dt = Imos - Q/Tau - Q^2*4*Isne*NB^2/(ni^2*QB^2).
-    // DC sweeps solve for Vae (diode-like conditioning: fast and robust at low Vce); everything
-    // else integrates Q on a linear capacitor and derives Vae from it, which is what keeps
-    // switching transients stable. Both give the same static solution.
-    const bool dcSweep = m_res.analysis == QLatin1String("dc");
-    if (dcSweep) {
+
+    // Conductivity-modulated base resistance, anode -> emitter: IT = Vae/Rb, Rb = W/(q*mueff*A*neff),
+    //   mueff = mun + mup*Q/(Q+QB),  neff = (W/2L)*R/atanh(R*tanh(W/2L)/(NB+P0*csch(W/L)*tanh(W/2L))),
+    //   R = sqrt(NB^2 + P0^2*csch^2(W/L)),  P0 = Q/(q*A*L*tanh(W/2L)).
+    // neff weights the carrier profile across the base, which sags in the middle when the diffusion
+    // length is short against the base width (an average density underestimates Rb there).
+    const QString nneff = internalNode(t[0], 88);
+    {
+        const QString u = QStringLiteral("(%1/%2)").arg(w, num(l));
+        const QString p0n = QStringLiteral("(%1/(%2*tanh(%3/2)))").arg(qq, num(q * A * l), u);
+        const QString cs = QStringLiteral("(1/sinh(min(%1,600)))").arg(u);
+        const QString rr = QStringLiteral("sqrt(%1+(%2*%3)*(%2*%3))").arg(num(nb * nb), p0n, cs);
+        const QString arg = QStringLiteral("min(%1*tanh(%2/2)/(%3+%4*%5*tanh(%2/2)),0.999999999999)").arg(rr, u, num(nb), p0n, cs);
+        out << QStringLiteral("B%1_neff %2 0 V=1e-14*(%3/2)*%4/atanh(%5)").arg(name, nneff, u, rr, arg);
+    }
+    const QString gb = QStringLiteral("(%1*(%2+%3*%4/(%4+%1*%5*%6))*V(%7)*1e14/%5)")
+                           .arg(num(q * A), num(mp["mun"]), num(mp["mup"]), qq, w, num(nb), nneff);
+    const QString it = QStringLiteral("(%1*V(%2,%3)*%4)").arg(sg, c, em, gb); // in n-channel orientation
+    out << QStringLiteral("B%1_rb %2 %3 I=%4*%5").arg(name, c, em, sg, it);
+
+    // Emitter-base junction (em -> d): its voltage follows the base charge Q,
+    //   Vebd = kT/q*ln[(P0/ni^2 + 1/NB)*(NB+P0)] - Dc/mun*ln((P0+NB)/NB),  P0 = Q/(q*A*L*tanh(W/2L)),
+    //   Vebj = 0.6 - (Q-Qbi)^2/(2*q*NB*eps*A^2) for reverse blocking (min of the two up to Qbi),
+    // and its current is Ibss + dQ/dt, so Q integrates the current the circuit actually supplies
+    // (channel plus the Miller and drain-source displacement currents) minus Ibss. With this and
+    // the neff base resistance the on-state voltage matches LTspice within 0.1% across Tau, Area,
+    // Agd, Wb and NB.
+    const double qbi = A * std::sqrt(2 * eps * q * nb * 0.6);
+    const QString ibss = QStringLiteral("(%1/%2+%3*%1*abs(%1)/(%4*%4))").arg(qs, num(mp["tau"]), num(kc), w);
+    if (m_res.analysis == QLatin1String("dc")) {
+        // DC sweeps: with dQ/dt = 0 the junction is a diode carrying Ibss(Q(Veb)), with the junction
+        // voltage as the unknown, which is far more robust than balancing a charge node without time
+        // history. Vebd(P0) isn't invertible in closed form, so an auxiliary node y holds its first
+        // term, kT/q*ln((P0/ni^2+1/NB)*(NB+P0)), which is (P0 from a quadratic), and solves
+        //   y - Dc/mun*ln((P0+NB)/NB) = Veb  (monotonic in y).
         // pow() rather than exp(): ngspice caps exp() arguments at 14 in LTspice-compatibility mode;
-        // above 60*Vt the exponential continues linearly (as SPICE junction models limit it).
-        // Under reverse bias Q no longer depends on Vae, so a 1nS term anchors the node near 0V.
-        const QString ev = QStringLiteral("(pow(2.718281828459045,min(V(%1)/%2,60))*(1+max(V(%1)/%2-60,0)))").arg(nvae, num(vth));
+        // above 60*Vt the exponential continues linearly.
+        const QString ny = internalNode(t[0], 89);
+        const QString veb = QStringLiteral("(%1*V(%2,%3))").arg(sg, em, d);
+        const QString yv = QStringLiteral("V(%1)").arg(ny);
+        const QString ev = QStringLiteral("(pow(2.718281828459045,min(%1/%2,60))*(1+max(%1/%2-60,0)))").arg(yv, num(vth));
         const QString x = QStringLiteral("(%1*(%2-1))").arg(num(ni * ni), ev);
-        out << QStringLiteral("B%1_qv %2 0 V=1e6*%3*tanh(%4/%5)*2*%6/(%7+sqrt(%8+4*%6))")
-                   .arg(name, nq, num(q * A * l), w, num(2 * l), x, num(nb), num(nb * nb));
-        out << QStringLiteral("B%1_bal 0 %2 I=%3-%4/%5-%6*%4*abs(%4)/(%7*%7)-1e-9*V(%2)").arg(name, nvae, imos, qs, num(mp["tau"]), num(kc), w);
-        out << QStringLiteral("R%1_bal %2 0 1e15").arg(name, nvae);
-        out << QStringLiteral("B%1_ae %2 %3 V=%4*V(%5)").arg(name, c, a, sg, nvae);
+        const double bq = nb + ni * ni / nb;
+        const QString p0y = QStringLiteral("(2*%1/(%2+sqrt(%3+4*%1)))").arg(x, num(bq), num(bq * bq));
+        out << QStringLiteral("B%1_y %2 0 I=%3-%4*ln((%5+%6)/%6)-%7").arg(name, ny, yv, num(2 * vth * mp["mup"] / (mp["mun"] + mp["mup"])), p0y, num(nb), veb);
+        out << QStringLiteral("R%1_y %2 0 1e15").arg(name, ny);
+        out << QStringLiteral("B%1_qv %2 0 V=1e6*%3*tanh(%4/%5)*%6").arg(name, nq, num(q * A * l), w, num(2 * l), p0y);
+        out << QStringLiteral("B%1_eb %2 %3 I=%4*(%5+1e-12*%6)").arg(name, em, d, sg, ibss, veb);
     } else {
-        out << QStringLiteral("B%1_q 0 %2 I=%3-%4/%5-%6*%4*abs(%4)/(%7*%7)").arg(name, nq, imos, qs, num(mp["tau"]), num(kc), w);
+        const QString p0 = QStringLiteral("(%1/(%2*tanh(%3/%4)))").arg(qq, num(q * A * l), w, num(2 * l));
+        const QString vebd = QStringLiteral("(%1*ln((%2/%3+%4)*(%5+%2))-%6*ln((%2+%5)/%5))")
+                                 .arg(num(vth), p0, num(ni * ni), num(1.0 / nb), num(nb), num(2 * vth * mp["mup"] / (mp["mun"] + mp["mup"])));
+        const QString vebj = QStringLiteral("(0.6-(%1-%2)*(%1-%2)/%3)").arg(qs, num(qbi), num(2 * q * nb * eps * A * A));
+        out << QStringLiteral("B%1_eb %2 %3 V=%4*(%5<0 ? %6 : (%5<%7 ? min(%6,%8) : %8))").arg(name, em, ebs, sg, qs, vebj, num(qbi), vebd);
+        out << QStringLiteral("V%1_eb %2 %3 0").arg(name, ebs, d);
+        out << QStringLiteral("B%1_q 0 %2 I=%3*I(V%1_eb)-%4").arg(name, nq, sg, ibss);
         out << QStringLiteral("C%1_q %2 0 1e-6").arg(name, nq);
         out << QStringLiteral("R%1_q %2 0 1e15").arg(name, nq);
-        const QString p0 = QStringLiteral("(%1/(%2*tanh(%3/%4)))").arg(qq, num(q * A * l), w, num(2 * l));
-        out << QStringLiteral("B%1_ae %2 %3 V=%4*%5*ln(1+%6*(%6+%7)/%8)").arg(name, c, a, sg, num(vth), p0, num(nb), num(ni * ni));
     }
-    // Holes collected at the emitter, and the conductivity-modulated base resistance.
-    out << QStringLiteral("B%1_hole %2 %3 I=%4*(%5/%6+%7*%8/(%9*%9))").arg(name, d, e, sg, imos, num(b), num(4 * dp), qs, w);
-    out << QStringLiteral("B%1_rb %2 %3 I=V(%2,%3)*%4*(%5*%6+%7*%8/(%4*%9))/%9")
-               .arg(name, a, d, num(q * A), num(mp["mun"]), num(nb), num(mp["mun"] + mp["mup"]), qq, w);
+
+    // PNP collector current (em -> cathode): Icss = IT/(1+b) + b/(1+b)*4*Dp*Q/W^2, plus the
+    // collector-emitter redistribution current Ccer*dVec/dt, Ccer = Q*Cbcj/(3*QB), Cbcj = A*eps/Wbcj,
+    // QB = q*A*W*NB. Stored base charge swept out as the depletion layer widens sets the voltage
+    // rise at turn-off. dVec/dt is the current of a 1nF capacitor charged to Vec.
+    const QString vx = internalNode(t[0], 96), vy = internalNode(t[0], 97);
+    out << QStringLiteral("B%1_vec %2 0 V=%3*V(%4,%5)").arg(name, vx, sg, em, e);
+    out << QStringLiteral("C%1_vec %2 %3 1e-9").arg(name, vx, vy);
+    out << QStringLiteral("V%1_vec %2 0 0").arg(name, vy);
+    const QString wbcj = QStringLiteral("(%1*sqrt(%2))").arg(num(kdep), vdsPos);
+    const QString ccer = QStringLiteral("(%1*%2/%3/(3*%4*%5))").arg(qq, num(A * eps), wbcj, num(q * A * nb), w);
+    const QString icss = QStringLiteral("(%1/%2+%3*%4/(%5*%5))").arg(it, num(1 + b), num(b / (1 + b) * 4 * dp), qq, w);
+    const QString iccer = QStringLiteral("(%1*I(V%2_vec)*1e9)").arg(ccer, name);
+    out << QStringLiteral("B%1_css %2 %3 I=%4*(%5+%6)").arg(name, em, e, sg, icss, iccer);
+
+    // Channel and avalanche multiplication (d -> cathode): Imos + Imult,
+    // Imult = (M-1)*(Imos+Ic) + M*Igen, M = 1/(1-(Vbc/BVcbo)^BVn), BVcbo = BVf*5.34e13*NB^-0.75,
+    // Igen = q*ni*A*Wbcj/Tau.
+    const double bvcbo = mp["bvf"] * 5.34e13 * std::pow(nb, -0.75);
+    const QString mfac = QStringLiteral("(1/(1-pow(min(max(%1,0)/%2,0.999),%3)))").arg(vds, num(bvcbo), num(mp["bvn"]));
+    const QString igen = QStringLiteral("(%1*%2)").arg(num(q * ni * A / mp["tau"]), wbcj);
+    out << QStringLiteral("B%1_mos %2 %3 I=%4*(%5+(%6-1)*(%5+%7+%8)+%6*%9)").arg(name, d, e, sg, imos, mfac, icss, iccer, igen);
+
     // Capacitances. Nonlinear ones are charge-based: a behavioral source gives Q(V) (in nC) as a
     // voltage, a linear 1nF capacitor turns its rate of change into a current sensed by a 0V
     // source, and a current-controlled source injects it between the device nodes. ngspice's own
     // integrator handles the dynamics (behavioral ddt() is unstable when it dominates a node).
-    out << QStringLiteral("C%1_gs %2 %3 %4").arg(name, g, e, num(mp["cgs"] * A));
+    // Gate oxide outside the gate-drain overlap, Cgs*(Area-Agd). Measured in LTspice (input
+    // capacitance and Miller plateau for several Area/Agd/Cgs/Coxd values): 99% of it goes to the
+    // cathode and 1% to the drain, a constant gate-drain capacitance on top of Hefner's Cgd.
+    const double cgsTotal = mp["cgs"] * std::max(A - agd, 0.0);
+    out << QStringLiteral("C%1_gs %2 %3 %4").arg(name, g, e, num(0.99 * cgsTotal));
+    out << QStringLiteral("C%1_gdo %2 %3 %4").arg(name, g, d, num(0.01 * cgsTotal));
     auto chargeCap = [&](const QString &tag, int idx, const QString &n1, const QString &n2, const QString &qexpr,
                          const QString &polarity) {
         const QString qx = internalNode(t[0], idx), qy = internalNode(t[0], idx + 1);
@@ -3285,22 +3352,19 @@ QStringList NetlistTranslator::translateIgbt(const QStringList &t, const QString
         out << QStringLiteral("V%1_%2 %3 0 0").arg(name, tag, qy);
         out << QStringLiteral("F%1_%2 %3 %4 V%1_%2 %5").arg(name, tag, n1, n2, polarity);
     };
-    // Gate-drain: oxide (Coxd*Agd) when accumulated (Vdg < -Vtd), otherwise in series with the
-    // depletion capacitance K/sqrt(Vdg+Vtd): Q = 2K*(s - a*ln(1+s/a)), s = sqrt(Vdg+Vtd), a = K/Cox.
+    // Gate-drain: oxide (Coxd*Agd) when accumulated (Vds <= Vgs - Vtd), otherwise in series with
+    // the depletion capacitance K/sqrt(Vdg+Vtd): Q = 2K*(s - a*ln(1+s/a)), s = sqrt(Vdg+Vtd), a = K/Cox.
     const double coxd = mp["coxd"] * agd, kgd = eps * agd / kdep, agdRatio = kgd / std::max(coxd, 1e-30);
     const QString vdg = QStringLiteral("(%1*V(%2,%3))").arg(sg, d, g);
     const QString ugd = QStringLiteral("(%1+%2)").arg(vdg, num(mp["vtd"]));
     const QString sgd = QStringLiteral("sqrt(max(%1,0)+1e-12)").arg(ugd);
     chargeCap(QStringLiteral("gd"), 90, d, g,
               QStringLiteral("%1*min(%2,0)+%3*(%4-%5*ln(1+%4/%5))").arg(num(coxd), ugd, num(2 * kgd), sgd, num(agdRatio)), sg);
-    // Drain-source (base-collector junction) depletion: Q = 2*K*sqrt(Vds+0.6).
-    const QString qdep = QStringLiteral("(%1*sqrt(%2+0.01))").arg(num(2 * eps * std::max(A - agd, 0.0) / kdep), pos(vds + QStringLiteral("+0.6")));
+    // Drain-source (drain-body junction, area A-Agd) depletion: Q = Ads*sqrt(2*eps*q*NB*(Vds+0.6)).
+    const QString qdep = QStringLiteral("(%1*sqrt(%2+0.01))").arg(num(2 * eps * std::max(A - agd, 0.0) / kdep), vdsPos);
     chargeCap(QStringLiteral("ds"), 92, d, e, qdep, sg);
-    // Collector-emitter redistribution (Ccer = Q*Cbcj/(3*QB), QB = q*A*W*NB): stored base charge
-    // swept out as the depletion layer widens, which sets the voltage rise rate at turn-off.
-    chargeCap(QStringLiteral("cer"), 94, d, e, QStringLiteral("%1/(3*%2*%3)*%4").arg(qq, num(q * A * nb), w, qdep), sg);
-    m_res.warnings << QStringLiteral("%1: IGBT simulated with a Hefner-equation behavioral model (static curves match LTspice's closely; "
-                                     "switching transients are approximate)").arg(t[0]);
+    m_res.warnings << QStringLiteral("%1: IGBT simulated with the Hefner model equations (velocity saturation and carrier-carrier "
+                                     "scattering omitted)").arg(t[0]);
     return out;
 }
 

@@ -87,6 +87,14 @@ public:
     // Simulation linkage.
     void setSimulationAvailable(bool available, bool hasTransient);
     void setOperatingPoint(const QHash<QString, double> &op);
+    // Trace names of pins the simulation measured ("u1:3" -> "Ix(u1:3)"), from SimResult.
+    void setPinProbes(const QHash<QString, QString> &probes);
+    // The analysis of the last run and the names of its signals: in a noise analysis a click
+    // on a device plots its noise contribution, V(R1), as in LTspice.
+    void setProbeContext(const QString &analysis, const QSet<QString> &signalNames);
+    // The current probe of every symbol pin, as (description, expression); for testing.
+    QList<QPair<QString, QString>> allProbeExpressions() const;
+    static QString shownName(const QString &spiceName);
     void setHighlightNets(const QSet<QString> &nets);
     void setInstancePath(const QString &path) { m_instancePath = path; } // e.g. "xu1" for a sub-sheet
     QString instancePath() const { return m_instancePath; }
@@ -168,6 +176,7 @@ private:
     // Probing
     QString probeExpressionAt(QPointF world, bool alt, QString *description) const;
     QString nodeExpr(const QString &net) const;
+    QString noiseProbe(const QString &shown, QString *description) const;
     QString elementExpr(const QString &fn, const QString &elem) const;
 
     void updateCursorShape(QPointF world, Qt::KeyboardModifiers mods);
@@ -228,6 +237,9 @@ private:
     bool m_simAvailable = false;
     bool m_simTransient = false;
     QHash<QString, double> m_op;
+    QHash<QString, QString> m_pinProbes;
+    QString m_probeAnalysis;
+    QSet<QString> m_probeSignals; // lower case
     bool m_showOpLabels = false;
     QSet<QString> m_highlightNets;
     QString m_instancePath;

@@ -1032,8 +1032,12 @@ bool isSignalFunction(const QString &ident)
     static const QStringList names = {QStringLiteral("v"),  QStringLiteral("i"),  QStringLiteral("ix"), QStringLiteral("ic"),
                                       QStringLiteral("ib"), QStringLiteral("ie"), QStringLiteral("id"), QStringLiteral("ig"),
                                       QStringLiteral("is"), QStringLiteral("ip"), QStringLiteral("vm"), QStringLiteral("vdb"),
-                                      QStringLiteral("vp"), QStringLiteral("vr"), QStringLiteral("vi")};
+                                      QStringLiteral("vp"), QStringLiteral("vr"), QStringLiteral("vi"), QStringLiteral("ia")};
     if (names.contains(ident.toLower()))
+        return true;
+    // Special-function device pin currents: I1(A1) ... I8(A1).
+    static const QRegularExpression pinCurrent(QStringLiteral("^i[1-8]$"), QRegularExpression::CaseInsensitiveOption);
+    if (pinCurrent.match(ident).hasMatch())
         return true;
     // .net two-port results: S11(V1) ... H22(V1), Zin/Zout/Yin/Yout(V1).
     static const QRegularExpression twoPort(QStringLiteral("^([szyh][12][12]|zin|zout|yin|yout)$"), QRegularExpression::CaseInsensitiveOption);

@@ -31,6 +31,7 @@ struct SimResult {
     // LTspice would plot automatically for it (empty: a blank Bode plot).
     QList<DatasetPtr> fraData;
     QStringList fraAutoPlot;
+    QHash<QString, QString> pinProbes;    // click-probe names of measured pins (TranslationResult::pinProbes)
 };
 
 // Runs simulations in worker processes and assembles the results.

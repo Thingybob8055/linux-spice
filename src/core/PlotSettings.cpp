@@ -1,4 +1,5 @@
 #include "PlotSettings.h"
+#include "RawFile.h"
 
 #include "TextIO.h"
 
@@ -153,6 +154,13 @@ const PlotSection *PlotSettingsFile::section(const QString &analysis) const
     for (const PlotSection &s : sections)
         if (s.analysis.compare(analysis, Qt::CaseInsensitive) == 0)
             return &s;
+    // Plot names vary between simulators and versions ("Noise Spectral Density Curves" vs.
+    // LTspice's "Noise Spectral Density - (V/Hz½ or A/Hz½)"): fall back to the analysis type.
+    const Dataset::Kind kind = rawfile::kindFromPlotName(analysis);
+    if (kind != Dataset::Kind::Unknown)
+        for (const PlotSection &s : sections)
+            if (rawfile::kindFromPlotName(s.analysis) == kind)
+                return &s;
     return nullptr;
 }
 

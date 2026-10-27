@@ -134,6 +134,8 @@ static void testExpression()
     CHECK(near(Expression("sq(x)+1").evaluateScalar(ctx, &ok), 10));
     Expression bad("1+");
     CHECK(!bad.isValid());
+    // NoiseFigure.plt's trace: Boltzmann's constant k and "1K" as a number.
+    CHECK(near(Expression("10*log10(x*x/(4*k*300.15*1K))").evaluateScalar(ctx, &ok), 10 * std::log10(9 / (4 * 1.3806503e-23 * 300.15 * 1000))) && ok);
 }
 
 static void testSchematicRoundTrip()

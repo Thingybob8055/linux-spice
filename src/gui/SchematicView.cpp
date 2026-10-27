@@ -1192,6 +1192,63 @@ QString SchematicView::elementExpr(const QString &fn, const QString &elem) const
     return QStringLiteral("%1(%2)").arg(fn, e);
 }
 
+// The name LTspice gives an instance in its results: "M§Q1" -> "Q1", "XU1" -> "U1".
+QString SchematicView::shownName(const QString &spiceName)
+{
+    if (spiceName.contains(QChar(0xA7)))
+        return spiceName.section(QChar(0xA7), -1);
+    if (spiceName.startsWith('X', Qt::CaseInsensitive))
+        return spiceName.mid(1);
+    return spiceName;
+}
+
+void SchematicView::setPinProbes(const QHash<QString, QString> &probes)
+{
+    m_pinProbes = probes;
+}
+
+void SchematicView::setProbeContext(const QString &analysis, const QSet<QString> &signalNames)
+{
+    m_probeAnalysis = analysis;
+    m_probeSignals = signalNames;
+}
+
+QString SchematicView::noiseProbe(const QString &shown, QString *description) const
+{
+    const QString expr = QStringLiteral("V(%1)").arg(shown);
+    if (!m_probeSignals.contains(expr.toLower()))
+        return QString();
+    if (description)
+        *description = tr("Noise contribution of %1").arg(shown);
+    return expr;
+}
+
+QList<QPair<QString, QString>> SchematicView::allProbeExpressions() const
+{
+    QList<QPair<QString, QString>> out;
+    auto add = [&](QPointF w, const QString &what) {
+        QString desc;
+        const QString e = probeExpressionAt(w, false, &desc);
+        if (!e.isEmpty())
+            out.append({what, e});
+    };
+    for (int i = 0; i < m_sch.symbols.size(); ++i) {
+        const SymbolInstance &s = m_sch.symbols[i];
+        if (!s.def)
+            continue;
+        for (int k = 0; k < s.def->pins.size(); ++k)
+            add(s.pinWorld(s.def->pins[k]), QStringLiteral("%1 pin %2").arg(s.instName(), s.def->pins[k].name));
+    }
+    const Connectivity &c = connectivity();
+    QSet<QString> nets;
+    for (const QString &n : c.wireNet)
+        if (!n.isEmpty() && n != QLatin1String("0") && m_probeAnalysis != QLatin1String("noise"))
+            nets.insert(n);
+    for (const QString &n : std::as_const(nets))
+        out.append({QStringLiteral("net %1").arg(n), QStringLiteral("V(%1)").arg(nodeExpr(n))});
+    return out;
+}
+
 QString SchematicView::probeExpressionAt(QPointF world, bool alt, QString *description) const
 {
     const Connectivity &c = connectivity();
@@ -1206,23 +1263,42 @@ QString SchematicView::probeExpressionAt(QPointF world, bool alt, QString *descr
             if (QLineF(pw, world).length() < hitTolerance() * 0.8) {
                 const QString name = Netlister::spiceNameFor(s);
                 const QChar kind = name.isEmpty() ? QChar() : name[0].toUpper();
+                const QString shown = shownName(name);
+                if (kind == 'J' && s.def->pins.size() == 2)
+                    return QString(); // a wire jumper: a short, no current is saved
+                if (m_probeAnalysis == QLatin1String("noise"))
+                    return noiseProbe(shown, description);
+                // Netlist position of the pin (SpiceOrder), which also sets a two-terminal
+                // device's current direction.
+                const int order = s.def->pins[k].spiceOrder > 0 ? s.def->pins[k].spiceOrder : k + 1;
+                if (description)
+                    *description = tr("Current into pin %1 of %2").arg(s.def->pins[k].name, s.instName());
+                // Pins measured by the simulation (subcircuit, special-function and IGBT pins).
+                if (m_instancePath.isEmpty()) {
+                    const auto pp = m_pinProbes.constFind(QStringLiteral("%1:%2").arg(shown.toLower()).arg(order));
+                    if (pp != m_pinProbes.constEnd())
+                        return *pp;
+                }
                 QString fn = QStringLiteral("I");
                 const QString pinName = s.def->pins[k].name.toUpper();
                 if (kind == 'Q') fn = QStringLiteral("I") + (pinName.isEmpty() ? QStringLiteral("c") : pinName.left(1).toLower());
-                else if (kind == 'M' || kind == 'J') fn = QStringLiteral("I") + (pinName.isEmpty() ? QStringLiteral("d") : pinName.left(1).toLower());
-                if (description)
-                    *description = tr("Current into pin %1 of %2").arg(s.def->pins[k].name, s.instName());
-                if (kind == 'Q' || kind == 'M' || kind == 'J')
-                    return elementExpr(fn, name);
+                else if (kind == 'M' || kind == 'J' || kind == 'Z') fn = QStringLiteral("I") + (pinName.isEmpty() ? QStringLiteral("d") : pinName.left(1).toLower());
+                if (kind == 'Q' || kind == 'M' || kind == 'J' || kind == 'Z')
+                    return elementExpr(fn, shown);
                 if (kind == 'X')
-                    return elementExpr(QStringLiteral("Ix"), name + ':' + s.def->pins[k].name);
-                return k == 0 ? elementExpr(QStringLiteral("I"), name) : QStringLiteral("-") + elementExpr(QStringLiteral("I"), name);
+                    return elementExpr(QStringLiteral("Ix"), shown.toLower() + ':' + s.def->pins[k].name.toLower());
+                if (kind == 'A')
+                    return QString(); // only pins the simulation measured
+                if (kind == 'T') // a transmission line's port-1 current; its other terminals aren't available
+                    return order == 1 ? elementExpr(QStringLiteral("Ia"), shown) : QString();
+                return order == 1 ? elementExpr(QStringLiteral("I"), shown) : QStringLiteral("-") + elementExpr(QStringLiteral("I"), shown);
             }
         }
     }
     if (it.type == SchItem::Wire || it.type == SchItem::Flag) {
         const QString net = it.type == SchItem::Wire ? c.wireNet.value(it.index) : c.flagNet.value(it.index);
-        if (net.isEmpty() || net == QLatin1String("0"))
+        // A noise analysis has no node voltages.
+        if (net.isEmpty() || net == QLatin1String("0") || m_probeAnalysis == QLatin1String("noise"))
             return QString();
         if (description)
             *description = tr("Voltage on net %1").arg(net);
@@ -1241,25 +1317,32 @@ QString SchematicView::probeExpressionAt(QPointF world, bool alt, QString *descr
                 *description = tr("Power dissipated in %1").arg(s.instName());
             if (s.def->pins.size() == 2 && nets.size() == 2) {
                 const QString v = QStringLiteral("V(%1,%2)").arg(nodeExpr(nets[0]), nodeExpr(nets[1]));
-                return QStringLiteral("%1*%2").arg(v, elementExpr(QStringLiteral("I"), name));
+                return QStringLiteral("%1*%2").arg(v, elementExpr(QStringLiteral("I"), shownName(name)));
             }
             if (kind == 'Q' && nets.size() >= 3)
                 return QStringLiteral("V(%1,%3)*%4+V(%2,%3)*%5")
-                    .arg(nodeExpr(nets[0]), nodeExpr(nets[1]), nodeExpr(nets[2]), elementExpr(QStringLiteral("Ic"), name),
-                         elementExpr(QStringLiteral("Ib"), name));
+                    .arg(nodeExpr(nets[0]), nodeExpr(nets[1]), nodeExpr(nets[2]), elementExpr(QStringLiteral("Ic"), shownName(name)),
+                         elementExpr(QStringLiteral("Ib"), shownName(name)));
             if ((kind == 'M' || kind == 'J') && nets.size() >= 3)
-                return QStringLiteral("V(%1,%2)*%3").arg(nodeExpr(nets[0]), nodeExpr(nets[2]), elementExpr(QStringLiteral("Id"), name));
+                return QStringLiteral("V(%1,%2)*%3").arg(nodeExpr(nets[0]), nodeExpr(nets[2]), elementExpr(QStringLiteral("Id"), shownName(name)));
             return QString();
         }
+        const QString shown = shownName(name);
+        if (kind == 'J' && s.def->pins.size() == 2)
+            return QString();
+        if (m_probeAnalysis == QLatin1String("noise"))
+            return noiseProbe(shown, description);
         if (description)
             *description = tr("Current through %1").arg(s.instName());
-        if (kind == 'Q')
-            return elementExpr(QStringLiteral("Ic"), name);
+        if (kind == 'Q' || kind == 'Z')
+            return elementExpr(QStringLiteral("Ic"), shown);
         if (kind == 'M' || kind == 'J')
-            return elementExpr(QStringLiteral("Id"), name);
-        if (kind == 'X')
+            return elementExpr(QStringLiteral("Id"), shown);
+        if (kind == 'X' || kind == 'A')
             return QString();
-        return elementExpr(QStringLiteral("I"), name);
+        if (kind == 'T')
+            return elementExpr(QStringLiteral("Ia"), shown);
+        return elementExpr(QStringLiteral("I"), shown);
     }
     return QString();
 }

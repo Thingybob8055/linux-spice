@@ -48,6 +48,20 @@
 #include <QToolBar>
 #include <QUrl>
 
+namespace {
+
+// Lower-case names of a result's signals (for the schematic's probes).
+QSet<QString> signalNames(const DatasetPtr &data)
+{
+    QSet<QString> names;
+    if (data)
+        for (const auto &v : data->vars)
+            names.insert(v.name.toLower());
+    return names;
+}
+
+} // namespace
+
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
 {
@@ -1178,6 +1192,8 @@ void MainWindow::openSubSheet(SchematicView *from, const QString &ascPath, const
     if (m_sessions.contains(root) && m_sessions[root].hasResult) {
         v->setSimulationAvailable(true, m_sessions[root].last.analysis == QLatin1String("tran"));
         v->setOperatingPoint(m_sessions[root].last.operatingPoint);
+        v->setPinProbes(m_sessions[root].last.pinProbes);
+        v->setProbeContext(m_sessions[root].last.analysis, signalNames(m_sessions[root].last.data));
     }
     QMdiSubWindow *w = addDocument(v);
     w->setWindowTitle(QStringLiteral("%1 [%2]").arg(QFileInfo(ascPath).fileName(), instancePath));
@@ -1394,6 +1410,8 @@ void MainWindow::simulationFinished(DocumentWidget *source, const SimResult &r)
     auto applyTo = [&](SchematicView *v) {
         v->setSimulationAvailable(r.data && r.data->kind != Dataset::Kind::OperatingPoint, r.analysis == QLatin1String("tran"));
         v->setOperatingPoint(r.operatingPoint);
+        v->setPinProbes(r.pinProbes);
+        v->setProbeContext(r.analysis, signalNames(r.data));
     };
     if (auto *sch = qobject_cast<SchematicView *>(source)) {
         applyTo(sch);
