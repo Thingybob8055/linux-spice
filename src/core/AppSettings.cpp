@@ -80,7 +80,12 @@ int AppSettings::maxThreads() const
 }
 
 void AppSettings::setMaxThreads(int n) { m_settings.setValue(QStringLiteral("sim/threads"), n); }
-QString AppSettings::defaultSolverOptions() const { return m_settings.value(QStringLiteral("sim/options")).toString(); }
+QString AppSettings::defaultSolverOptions() const
+{
+    if (qEnvironmentVariableIsSet("LINSPICE_SOLVER_OPTIONS"))
+        return qEnvironmentVariable("LINSPICE_SOLVER_OPTIONS");
+    return m_settings.value(QStringLiteral("sim/options")).toString();
+}
 void AppSettings::setDefaultSolverOptions(const QString &opts) { m_settings.setValue(QStringLiteral("sim/options"), opts); }
 bool AppSettings::saveDeviceCurrents() const { return m_settings.value(QStringLiteral("sim/saveCurrents"), true).toBool(); }
 void AppSettings::setSaveDeviceCurrents(bool on) { m_settings.setValue(QStringLiteral("sim/saveCurrents"), on); }

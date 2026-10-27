@@ -185,10 +185,10 @@ static void testTranslator()
     CHECK(r.errors.isEmpty());
     CHECK(r.analysis == "tran");
     CHECK(r.netlist.contains("Rl1_rser") || r.netlist.contains("RL1_rser"));
-    CHECK(r.netlist.contains(".tran 2e-06 0.002"));
+    CHECK(r.netlist.contains(".tran 1.953125e-06 0.002 0 1.953125e-06")); // LTspice's default max step: Tstop/1024
     CHECK(r.measStatements.size() == 1);
     CHECK(r.netlist.contains("? (1) : (0)"));
-    CHECK(!r.netlist.contains("tol="));
+    CHECK(!QString(r.netlist).remove(QStringLiteral(".options trtol=")).contains("tol=")); // component tolerances are stripped
     if (g_failures)
         std::fprintf(stderr, "%s\n", qPrintable(r.netlist));
 }

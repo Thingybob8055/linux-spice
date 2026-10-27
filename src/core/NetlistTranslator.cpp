@@ -511,25 +511,22 @@ TranslationResult NetlistTranslator::translate(const QStringList &ltLines, const
     if (m_opts.saveCurrents)
         out << QStringLiteral(".options savecurrents");
     out << m_optionLines;
-    // LTspice integrates with a damped ("modified trapezoidal") method; plain
-    // trapezoidal integration in ngspice rings on switching edges, so default
-    // to Gear unless the netlist chose a method.
+    // LTspice's documented defaults: trapezoidal integration and trtol=2 (ngspice uses 7, a much
+    // looser truncation-error bound). Gear's numerical damping and the looser bound make
+    // free-running oscillators run slow or die out (measured against LTspice: Colpitts -2.8%,
+    // Clapp/Pierce not oscillating); FRA runs tighten trtol further for small-signal accuracy.
     bool methodSet = m_opts.extraOptions.contains(QLatin1String("method"), Qt::CaseInsensitive);
-    for (const QString &o : m_optionLines)
+    bool trtolSet = m_opts.extraOptions.contains(QLatin1String("trtol"), Qt::CaseInsensitive);
+    for (const QString &o : m_optionLines) {
         if (o.contains(QLatin1String("method="), Qt::CaseInsensitive))
             methodSet = true;
-    // FRA extracts small sinusoids from the transient: trapezoidal integration (no numerical
-    // damping, as LTspice uses) and tighter truncation-error control keep high frequencies accurate.
-    if (!methodSet)
-        out << (m_res.fra ? QStringLiteral(".options method=trap") : QStringLiteral(".options method=gear"));
-    if (m_res.fra) {
-        bool trtolSet = m_opts.extraOptions.contains(QLatin1String("trtol"), Qt::CaseInsensitive);
-        for (const QString &o : m_optionLines)
-            if (o.contains(QLatin1String("trtol"), Qt::CaseInsensitive))
-                trtolSet = true;
-        if (!trtolSet)
-            out << QStringLiteral(".options trtol=1");
+        if (o.contains(QLatin1String("trtol"), Qt::CaseInsensitive))
+            trtolSet = true;
     }
+    if (!methodSet)
+        out << QStringLiteral(".options method=trap");
+    if (!trtolSet)
+        out << (m_res.fra ? QStringLiteral(".options trtol=1") : QStringLiteral(".options trtol=2"));
     if (!m_opts.extraOptions.trimmed().isEmpty())
         out << QStringLiteral(".options %1").arg(m_opts.extraOptions.trimmed());
     if (!m_analysis.isEmpty() && (m_res.fra || (m_deviceMaxStep > 0 && m_analysis.first().startsWith(QLatin1String(".tran"), Qt::CaseInsensitive)))) {
@@ -2672,10 +2669,14 @@ QString NetlistTranslator::translateAnalysis(const QString &line)
         if (tmax <= 0 && m_tranMaxStep > 0)
             tmax = m_tranMaxStep;
         if (tstep <= 0)
-            tstep = (tstop - tstart) / 1000.0;
-        // Device limits only ever tighten the step: ngspice's own default is min(tstep, span/50).
+            tstep = (tstop - tstart) / 1024.0;
+        // LTspice's maximum step is Tstop/1024 unless given; unlike ngspice it is not limited by the
+        // time step argument (".tran 1u 100m" still steps up to 97.7us). Measured on its raw files.
+        if (tmax <= 0)
+            tmax = tstop / 1024.0;
+        // Device limits only ever tighten the step.
         if (m_deviceMaxStep > 0) {
-            const double effective = tmax > 0 ? tmax : std::min(tstep, (tstop - tstart) / 50.0);
+            const double effective = tmax;
             if (m_deviceMaxStep < effective)
                 tmax = m_deviceMaxStep;
         }
@@ -3265,3 +3266,4 @@ QStringList NetlistTranslator::translateFraAnalyzer(const QStringList &t)
     }
     return lines;
 }
+

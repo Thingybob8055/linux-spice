@@ -294,6 +294,8 @@ Connectivity Netlister::connectivity(const Schematic &sch, QStringList *warnings
         QString keep;
         if (na == QLatin1String("0") || nb == QLatin1String("0"))
             keep = QStringLiteral("0");
+        else if (!na.isEmpty() && !isAuto(na) && !nb.isEmpty() && !isAuto(nb))
+            keep = std::min(na, nb); // two labels: the lower name (LTspice's NE555 example keeps "2" over "6")
         else if (!na.isEmpty() && !isAuto(na))
             keep = na;
         else if (!nb.isEmpty() && !isAuto(nb))

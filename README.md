@@ -60,7 +60,7 @@ Waveform viewer: multiple panes, Bode/Nyquist/Cartesian AC display, expressions 
 
 ## Accuracy
 
-Simulation results are checked against LTspice by running the same examples in both and comparing waveforms (`tools/compare_raw.py`). Of the 80 runnable examples in LTspice's `Educational` folder, 58 match within 1% normalized RMS error and 65 within 5%. Most of the rest are free-running oscillators, where tiny numerical differences grow into phase drift.
+Simulation results are checked against LTspice by running the same examples in both and comparing waveforms (`tools/compare_raw.py`). Of the 80 runnable examples in LTspice's `Educational` folder, 59 match within 1% normalized RMS error and 67 within 5%. LinSpice uses LTspice's documented integration defaults (trapezoidal, `trtol=2`, maximum step Tstop/1024), so free-running oscillators reproduce LTspice's frequency, including its own numerical frequency shift: most LC, RC and multivibrator examples agree within 0.05% and amplitude within 1%. Waveforms of oscillators still separate slowly over hundreds of cycles, because LTspice's own edge timing jitters by about 1% from cycle to cycle and no two simulators reproduce that exactly.
 
 Known gaps:
 
@@ -68,6 +68,8 @@ Known gaps:
 - `.machine` state machines, `.savestate`/`.loadstate` and `.savebias` are not supported.
 - IGBT switching transients are approximate; static characteristics match closely.
 - ngspice is slower than LTspice on some large behavioral circuits.
+- A few switching oscillators built from transistor-level or op-amp macromodels (`relax`, `NE555`, `colpits2`) run 0.4–0.8% slow: LTspice cuts its time step much harder at their switching edges than ngspice does.
+- In the `dimmer` example the triac occasionally fails to latch at a zero crossing under trapezoidal integration, where LTspice's "modified trapezoidal" method (not available in ngspice) keeps it firing.
 
 ## Development
 
