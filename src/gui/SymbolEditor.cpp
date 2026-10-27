@@ -38,6 +38,7 @@ bool SymbolEditor::load(const QString &path, QString *error)
     m_path = QFileInfo(path).absoluteFilePath();
     m_undo.clear();
     m_redo.clear();
+    emit undoStateChanged();
     m_modified = false;
     emit titleChanged();
     QMetaObject::invokeMethod(this, [this]() { zoomFit(); }, Qt::QueuedConnection);
@@ -78,6 +79,7 @@ void SymbolEditor::pushUndo()
 {
     m_undo << m_sym.serialize();
     m_redo.clear();
+    emit undoStateChanged();
 }
 
 void SymbolEditor::changed()
@@ -87,6 +89,7 @@ void SymbolEditor::changed()
         emit modifiedChanged(true);
     }
     update();
+    emit undoStateChanged();
 }
 
 void SymbolEditor::undo()

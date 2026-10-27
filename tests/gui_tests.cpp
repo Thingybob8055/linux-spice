@@ -45,6 +45,11 @@ private slots:
         v.show();
         QVERIFY(QTest::qWaitForWindowExposed(&v));
 
+        // Nothing to undo or redo on a fresh sheet.
+        QVERIFY(!v.canUndo());
+        QVERIFY(!v.canRedo());
+        QSignalSpy undoSpy(&v, &DocumentWidget::undoStateChanged);
+
         // Place a resistor by clicking in Place mode.
         v.startPlaceSymbol(QStringLiteral("res"));
         QCOMPARE(v.mode(), SchematicView::Mode::Place);
@@ -52,6 +57,9 @@ private slots:
         QTest::mouseClick(&v, Qt::LeftButton, {}, QPoint(200, 200));
         QCOMPARE(v.schematic().symbols.size(), 1);
         QCOMPARE(v.schematic().symbols[0].instName(), QStringLiteral("R1"));
+        QVERIFY(v.canUndo());
+        QVERIFY(!v.canRedo());
+        QVERIFY(undoSpy.count() > 0);
         // Placement snaps to the 16-unit grid.
         const QPoint pos = v.schematic().symbols[0].pos;
         QCOMPARE(pos.x() % 16, 0);
@@ -98,6 +106,7 @@ private slots:
         QVERIFY(v.schematic().symbols[0].orient != before);
         v.undo();
         QCOMPARE(v.schematic().symbols[0].orient, before);
+        QVERIFY(v.canRedo());
         v.redo();
         QVERIFY(v.schematic().symbols[0].orient != before);
         v.undo();

@@ -91,6 +91,8 @@ NetlistEditor::NetlistEditor(QWidget *parent)
     m_edit->setPalette(pal);
     new SpiceHighlighter(m_edit->document());
     lay->addWidget(m_edit);
+    connect(m_edit, &QPlainTextEdit::undoAvailable, this, &DocumentWidget::undoStateChanged);
+    connect(m_edit, &QPlainTextEdit::redoAvailable, this, &DocumentWidget::undoStateChanged);
     m_edit->setContextMenuPolicy(Qt::CustomContextMenu);
     connect(m_edit, &QPlainTextEdit::customContextMenuRequested, this, &NetlistEditor::contextMenu);
     connect(m_edit->document(), &QTextDocument::modificationChanged, this, &DocumentWidget::modifiedChanged);
@@ -236,3 +238,6 @@ void LogWindow::print(QPrinter *printer)
 {
     m_edit->print(printer);
 }
+
+bool NetlistEditor::canUndo() const { return m_edit->document()->isUndoAvailable(); }
+bool NetlistEditor::canRedo() const { return m_edit->document()->isRedoAvailable(); }

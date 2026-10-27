@@ -210,6 +210,7 @@ void WaveformView::pushZoom()
     m_zoomStack << z;
     while (m_zoomStack.size() > 100)
         m_zoomStack.removeFirst();
+    emit undoStateChanged();
 }
 
 void WaveformView::zoomBack()
@@ -219,6 +220,7 @@ void WaveformView::zoomBack()
         return;
     }
     const QList<double> z = m_zoomStack.takeLast();
+    emit undoStateChanged();
     xAxis.min = z[0];
     xAxis.max = z[1];
     xAxis.autoRange = z[2] != 0;

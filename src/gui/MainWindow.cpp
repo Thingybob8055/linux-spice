@@ -644,8 +644,8 @@ void MainWindow::updateActions()
     action(QStringLiteral("save"))->setEnabled(doc && doc->kind() != DocumentWidget::Kind::Waveform && doc->kind() != DocumentWidget::Kind::Log);
     action(QStringLiteral("saveAs"))->setEnabled(action(QStringLiteral("save"))->isEnabled());
     action(QStringLiteral("close"))->setEnabled(doc != nullptr);
-    action(QStringLiteral("undo"))->setEnabled(sch || sym || net || wave);
-    action(QStringLiteral("redo"))->setEnabled(sch || sym || net);
+    action(QStringLiteral("undo"))->setEnabled(doc && doc->canUndo());
+    action(QStringLiteral("redo"))->setEnabled(doc && doc->canRedo());
     DocumentWidget *root = simulationRoot(doc);
     const bool canRun = root != nullptr;
     action(QStringLiteral("run"))->setEnabled(canRun);
@@ -673,6 +673,10 @@ QMdiSubWindow *MainWindow::addDocument(DocumentWidget *doc)
     updateWindowTitle(doc);
     connect(doc, &DocumentWidget::titleChanged, this, [this, doc]() { updateWindowTitle(doc); });
     connect(doc, &DocumentWidget::modifiedChanged, this, [this, doc]() { updateWindowTitle(doc); });
+    connect(doc, &DocumentWidget::undoStateChanged, this, [this, doc]() {
+        if (doc == activeDoc())
+            updateActions();
+    });
     connect(doc, &DocumentWidget::statusMessage, this, [this](const QString &t, int ms) {
         if (ms > 0)
             statusBar()->showMessage(t, ms);

@@ -48,6 +48,8 @@ public:
     void zoomBack() override;
     void undo() override;
     void redo() override;
+    bool canUndo() const override { return !m_undo.isEmpty() || m_moving; }
+    bool canRedo() const override { return !m_redo.isEmpty(); }
     void print(QPrinter *printer) override;
     void copyImageToClipboard() override;
     bool exportImage(const QString &path) override;

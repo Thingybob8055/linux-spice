@@ -107,6 +107,7 @@ bool SchematicView::load(const QString &path, QString *error)
     m_sch = s;
     m_undo.clear();
     m_redo.clear();
+    emit undoStateChanged();
     m_selection.clear();
     invalidateConnectivity();
     setModified(false);
@@ -181,6 +182,7 @@ void SchematicView::pushUndo()
     while (m_undo.size() > AppSettings::instance().undoDepth())
         m_undo.removeFirst();
     m_redo.clear();
+    emit undoStateChanged();
 }
 
 void SchematicView::afterEdit()
@@ -189,6 +191,7 @@ void SchematicView::afterEdit()
     invalidateConnectivity();
     setModified(true);
     update();
+    emit undoStateChanged();
 }
 
 void SchematicView::undo()
@@ -210,6 +213,7 @@ void SchematicView::undo()
     invalidateConnectivity();
     setModified(true);
     update();
+    emit undoStateChanged();
 }
 
 void SchematicView::redo()
@@ -227,6 +231,7 @@ void SchematicView::redo()
     invalidateConnectivity();
     setModified(true);
     update();
+    emit undoStateChanged();
 }
 
 // ---------------------------------------------------------------- coordinates
@@ -1043,6 +1048,7 @@ void SchematicView::beginMove(const QSet<SchItem> &items, QPointF worldStart, bo
     if (m_moveItems.isEmpty())
         return;
     m_moving = true;
+    emit undoStateChanged();
     m_moveStretch = stretch;
     m_moveStart = snap(worldStart);
     m_moveDelta = QPoint();
@@ -1166,6 +1172,7 @@ void SchematicView::cancelMove()
     m_sch = m_moveBackup;
     invalidateConnectivity();
     update();
+    emit undoStateChanged();
 }
 
 // ---------------------------------------------------------------- probing

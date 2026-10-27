@@ -186,18 +186,34 @@ const QHash<QString, DrawFn> &drawers()
         pen(p, a);
         p.drawRect(QRectF(9, 3, 6, 4));
     });
-    d.insert(QStringLiteral("undo"), [pen](QPainter &p, const QColor &fg, const QColor &) {
-        pen(p, fg, 2);
-        p.drawArc(QRectF(6, 6, 14, 12), 90 * 16, -200 * 16);
-        p.drawLine(QPointF(13, 6), QPointF(8, 3));
-        p.drawLine(QPointF(13, 6), QPointF(9, 10));
-    });
-    d.insert(QStringLiteral("redo"), [pen](QPainter &p, const QColor &fg, const QColor &) {
-        pen(p, fg, 2);
-        p.drawArc(QRectF(4, 6, 14, 12), 90 * 16, 200 * 16);
-        p.drawLine(QPointF(11, 6), QPointF(16, 3));
-        p.drawLine(QPointF(11, 6), QPointF(15, 10));
-    });
+    // Undo/redo: a curved shaft that ends in a filled arrowhead pointing back (undo, left) or
+    // forward (redo, right), mirror images of each other.
+    auto curvedArrow = [pen](QPainter &p, const QColor &fg, bool forward) {
+        p.save();
+        if (forward) {
+            p.translate(24, 0);
+            p.scale(-1, 1);
+        }
+        pen(p, fg, 2.2);
+        QPainterPath shaft;
+        shaft.moveTo(8.5, 8);
+        shaft.lineTo(13.5, 8);
+        shaft.cubicTo(17.5, 8, 20.5, 11, 20.5, 14.5);
+        shaft.cubicTo(20.5, 18, 17.5, 20.5, 13.5, 20.5);
+        shaft.lineTo(9, 20.5);
+        p.drawPath(shaft);
+        QPainterPath head;
+        head.moveTo(3, 8);
+        head.lineTo(9.5, 3);
+        head.lineTo(9.5, 13);
+        head.closeSubpath();
+        p.setPen(Qt::NoPen);
+        p.setBrush(fg);
+        p.drawPath(head);
+        p.restore();
+    };
+    d.insert(QStringLiteral("undo"), [curvedArrow](QPainter &p, const QColor &fg, const QColor &) { curvedArrow(p, fg, false); });
+    d.insert(QStringLiteral("redo"), [curvedArrow](QPainter &p, const QColor &fg, const QColor &) { curvedArrow(p, fg, true); });
     d.insert(QStringLiteral("rotate"), [pen](QPainter &p, const QColor &fg, const QColor &) {
         pen(p, fg, 2);
         p.drawArc(QRectF(5, 5, 14, 14), 30 * 16, 300 * 16);

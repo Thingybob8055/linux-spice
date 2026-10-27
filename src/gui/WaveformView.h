@@ -123,6 +123,7 @@ public:
     void zoomFit() override;
     void zoomBack() override;
     void undo() override { zoomBack(); }
+    bool canUndo() const override { return !m_zoomStack.isEmpty(); } // undo = previous zoom
     void print(QPrinter *printer) override;
     void copyImageToClipboard() override;
     bool exportImage(const QString &path) override;

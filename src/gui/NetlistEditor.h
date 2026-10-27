@@ -19,6 +19,8 @@ public:
     QString fileFilter() const override { return tr("Netlists (*.net *.cir *.sp *.lib *.sub *.inc *.mod);;All files (*)"); }
     void undo() override;
     void redo() override;
+    bool canUndo() const override;
+    bool canRedo() const override;
     void zoomIn() override;
     void zoomOut() override;
     void print(QPrinter *printer) override;

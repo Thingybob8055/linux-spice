@@ -26,6 +26,8 @@ public:
     void zoomFit() override;
     void undo() override;
     void redo() override;
+    bool canUndo() const override { return !m_undo.isEmpty(); }
+    bool canRedo() const override { return !m_redo.isEmpty(); }
     bool exportImage(const QString &path) override;
 
     bool load(const QString &path, QString *error = nullptr);
