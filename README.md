@@ -67,10 +67,11 @@ The results contain the same probeable signals as LTspice's, under the same name
 Known gaps:
 
 - Transmission line terminal currents other than `Ia` are not available (ngspice's line model doesn't have them).
+- For a Laplace current source LTspice's `I(G1)` can differ from the current it actually delivers (it violates KCL in the `HalfSlope` example); LinSpice reports the delivered current.
 
 - The hysteretic core inductor model (`Hc=`, `Br=`, `Bs=`) is treated as a linear inductor.
 - `.machine` state machines, `.savestate`/`.loadstate` and `.savebias` are not supported.
-- IGBT switching transients are approximate; static characteristics match closely.
+- IGBT switching transients are approximate (terminal currents within a few percent of LTspice through switching; static characteristics within 1%). The IGBT's internal sub-device currents (`Id(m1:Z1)`, `I(cdg:Z1)`) are not available.
 - ngspice is slower than LTspice on some large behavioral circuits.
 - A few switching oscillators built from transistor-level or op-amp macromodels (`relax`, `NE555`, `colpits2`) run 0.4–0.8% slow: LTspice cuts its time step much harder at their switching edges than ngspice does.
 - In the `dimmer` example the triac occasionally fails to latch at a zero crossing under trapezoidal integration, where LTspice's "modified trapezoidal" method (not available in ngspice) keeps it firing.

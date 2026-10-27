@@ -199,8 +199,8 @@ private:
         return n >= 0 ? r : rdiv(R::constant(1.0), r);
     }
     // (c0 + c1*s)^e for a non-integer e: the integer part is exact, the
-    // fractional part f is approximated by lead-lag sections spaced three per
-    // decade over six decades above the corner (|error| < 0.1 dB, 0.5 deg).
+    // fractional part f is approximated by lead-lag sections (below; error < 0.01 dB,
+    // 0.02 deg against the exact response).
     std::optional<R> firstOrderPower(const Poly &c, double e)
     {
         if (c.size() == 1)
@@ -216,11 +216,17 @@ private:
         lin.n = {1.0, 1.0 / w};
         for (int i = 0; i < std::abs(int(ip)); ++i)
             r = ip > 0 ? rmul(r, lin) : rdiv(r, lin);
-        const int perDecade = 3, decades = 6;
+        // (1+s/w)^f = (p/w)^f with p = s+w. p^f is approximated by lead-lag sections in p
+        // over [w/1000, 1e6*w] and every zero/pole is then shifted by -w. Covering p well below
+        // w models the branch point at s=-w, which sets the long-time tail of the response
+        // (sections starting at the corner made the tail of 1/sqrt(1+s*tau) 30% low); at
+        // s=0 every section is exactly 1, so the DC gain stays exact.
+        const int perDecade = 4, decadesBelow = 3, decadesAbove = 6;
         const double ratio = std::pow(10.0, 1.0 / perDecade), off = (1.0 - f) / 2;
-        for (int k = 0; k < perDecade * decades; ++k) {
-            const double z = w * std::pow(ratio, k + off);
-            r.secs.append({z, z * std::pow(ratio, f)});
+        const double lo = w * std::pow(10.0, -decadesBelow);
+        for (int k = 0; k < perDecade * (decadesBelow + decadesAbove); ++k) {
+            const double z = lo * std::pow(ratio, k + off);
+            r.secs.append({z + w, z * std::pow(ratio, f) + w});
         }
         return r;
     }

@@ -227,6 +227,13 @@ static void testProbeableSignals()
         CHECK(r.netlist.contains(".noise V(out) V1 dec 10 1 1k 1"));
         CHECK(!r.netlist.contains("savecurrents"));
     }
+    {
+        const QStringList lt = {"* igbt", "V1 c 0 10", "V2 g 0 15", "Z1 c g 0 NIGBT", ".model NIGBT NIGBT", ".dc V1 0 10 1", ".end"};
+        NetlistTranslator tr;
+        const TranslationResult r = tr.translate(lt, o);
+        CHECK(r.pinCurrents.value("vlspin_z1_1") == "Ic(Z1)");
+        CHECK(r.pinCurrents.value("vlspin_z1_3") == "Ie(Z1)");
+    }
 }
 
 static void testStep()

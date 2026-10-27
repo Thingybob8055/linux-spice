@@ -1269,6 +1269,24 @@ QStringList NetlistTranslator::translateElement(const QString &rawLine, bool top
         }
         line = t.join(' ');
     }
+    // IGBT terminal currents Ic, Ig, Ie: the device is a behavioral model here, so they are
+    // measured at its terminals.
+    if (topLevel && k == 'Z' && t.size() >= 5 && senseLines.isEmpty()) {
+        const QString type = m_modelTypes.value(t[4].toLower());
+        if (type == QLatin1String("NIGBT") || type == QLatin1String("PIGBT")) {
+            const QString inst = elementName(t[0]).toLower();
+            const QString shown = t[0].section(QChar(0xA7), -1);
+            const char terms[] = {'c', 'g', 'e'};
+            for (int i = 1; i <= 3; ++i) {
+                const QString inner = internalNode(t[0], 200 + i);
+                const QString src = QStringLiteral("Vlspin_%1_%2").arg(inst).arg(i);
+                senseLines << QStringLiteral("%1 %2 %3 0").arg(src, nodeToken(t[i]), inner);
+                m_res.pinCurrents.insert(src.toLower(), QStringLiteral("I%1(%2)").arg(QLatin1Char(terms[i - 1])).arg(shown));
+                t[i] = inner;
+            }
+            line = t.join(' ');
+        }
+    }
     // Special-function devices: LTspice saves I1, I2 (inputs, which draw no current), I6 and
     // I7 (the outputs) and I8 (common, carrying the outputs' return current).
     if (topLevel && k == 'A' && t.size() >= 10 && senseLines.isEmpty()) {
