@@ -26,6 +26,18 @@ struct TranslationResult {
     QHash<QString, QString> params; // .param name -> expression text
     QString measComplexFormat;      // from .options meascplxfmt
     bool hasAnalysis = false;
+    // BJTs whose model has no substrate junction: LTspice reports their Is as zero,
+    // where ngspice's substrate current is gmin leakage.
+    QSet<QString> noSubstrateBjts; // lower-case LTspice names
+    // Pin current sense sources of subcircuit instances: lower-case source name -> "Ix(u1:pin)".
+    QHash<QString, QString> pinCurrents;
+    // Pin currents computed after the run: name -> pin currents whose negated sum it is
+    // (empty: identically zero), e.g. "I8(A1)" -> {"I6(A1)", "I7(A1)"}.
+    QList<QPair<QString, QStringList>> derivedCurrents;
+    // Rpar/Cpar are separate elements here but part of the device in LTspice, whose current
+    // includes them: lower-case element -> its parallel helper elements.
+    QHash<QString, QStringList> parallelParts;
+    QSet<QString> negatedDevices; // lower-case ngspice names whose terminal currents flip sign
     // .fra: the run is a transient with these analyzers' stimuli; results are extracted afterwards.
     bool fra = false;
     QList<fra::Analyzer> fraAnalyzers;
@@ -58,6 +70,7 @@ private:
     };
 
     void processLines(const QStringList &lines, int depth);
+    QStringList subcktPorts(const QString &name) const;
     void addLibrary(const QString &file, const QString &section);
     QStringList translateElement(const QString &line, bool topLevel);
     QStringList translateElementTokens(QStringList t, const QString &line, QChar k);

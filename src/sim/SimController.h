@@ -3,6 +3,7 @@
 #include "core/NetParams.h"
 #include "core/NetlistTranslator.h"
 #include "core/RawFile.h"
+#include "core/StepSweep.h"
 
 #include <QElapsedTimer>
 #include <QHash>
@@ -89,6 +90,7 @@ private:
     QList<Job> m_jobs;
     QList<TranslationResult> m_translations;
     QStringList m_stepLabels;
+    QList<StepAxis> m_stepAxes;
     QString m_outputBase;
     QString m_baseDir;
     QStringList m_ltNetlist;

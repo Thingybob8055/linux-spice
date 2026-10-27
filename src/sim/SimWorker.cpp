@@ -416,7 +416,7 @@ int runSimWorker(int argc, char **argv)
             else if (prefix == "ac") plotName = "AC Analysis";
             else if (prefix == "dc") plotName = "DC transfer characteristic";
             else if (prefix == "op") plotName = "Operating Point";
-            else if (prefix == "noise") plotName = npts > 1 ? "Noise Spectral Density Curves" : "Integrated Noise";
+            else if (prefix == "noise") plotName = scaleIdx >= 0 ? "Noise Spectral Density Curves" : "Integrated Noise"; // only the spectrum has a frequency scale
             else if (prefix == "tf") plotName = "Transfer Function";
             else if (prefix == "sp") plotName = "S-Parameter Analysis";
             else if (prefix == "pz") plotName = "Pole-Zero Analysis";

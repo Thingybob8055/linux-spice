@@ -508,8 +508,46 @@ TranslationResult NetlistTranslator::translate(const QStringList &ltLines, const
     for (const QString &m : m_models)
         out << translateModel(m);
     out << m_directives;
-    if (m_opts.saveCurrents)
+    // LTspice's noise plot holds every device's contribution to the output noise.
+    if (m_res.analysis == QLatin1String("noise"))
+        out << QStringLiteral(".options noiseall");
+    if (m_opts.saveCurrents && m_res.analysis != QLatin1String("noise")) {
         out << QStringLiteral(".options savecurrents");
+        // savecurrents' "@r1[i]" vectors stay empty in AC analysis; LTspice saves those
+        // currents there too, so AC runs measure them with ngspice's .probe instead.
+        if (m_res.analysis == QLatin1String("ac")) {
+            // (Semiconductors' "@q1[ic]" there are operating-point values; probing a
+            // multi-terminal device gives every terminal: "q1:c#branch", ...)
+            static const QRegularExpression probed(QStringLiteral("^([RCGIDFQMJ][^\\s]*)\\s"), QRegularExpression::CaseInsensitiveOption);
+            static const QRegularExpression currentB(QStringLiteral("^(B[^\\s]*)\\s+\\S+\\s+\\S+\\s+I\\s*="), QRegularExpression::CaseInsensitiveOption);
+            QStringList probes;
+            for (const QString &e : elements) {
+                auto m = probed.match(e);
+                if (!m.hasMatch())
+                    m = currentB.match(e);
+                if (m.hasMatch() && m_res.elementNames.contains(m.captured(1).toLower()))
+                    probes << QStringLiteral("i(%1)").arg(m.captured(1));
+            }
+            for (const QStringList &parts : std::as_const(m_res.parallelParts)) {
+                for (const QString &h : parts)
+                    probes << QStringLiteral("i(%1)").arg(h);
+            }
+            for (int i = 0; i < probes.size(); i += 16)
+                out << QStringLiteral(".probe ") + probes.mid(i, 16).join(' ');
+        }
+        // LTspice also saves each inductor's flux ("L1:flux") in transient analyses.
+        if (m_res.analysis == QLatin1String("tran")) {
+            static const QRegularExpression inductor(QStringLiteral("^(L[^\\s]*)\\s"), QRegularExpression::CaseInsensitiveOption);
+            QStringList fluxes;
+            for (const QString &e : elements) {
+                const auto m = inductor.match(e);
+                if (m.hasMatch() && m_res.elementNames.contains(m.captured(1).toLower()))
+                    fluxes << QStringLiteral("@%1[flux]").arg(m.captured(1).toLower());
+            }
+            for (int i = 0; i < fluxes.size(); i += 16)
+                out << QStringLiteral(".save all ") + fluxes.mid(i, 16).join(' ');
+        }
+    }
     out << m_optionLines;
     // LTspice's documented defaults: trapezoidal integration and trtol=2 (ngspice uses 7, a much
     // looser truncation-error bound). Gear's numerical damping and the looser bound make
@@ -1125,6 +1163,32 @@ QString NetlistTranslator::rewriteCurrents(const QString &expr) const
     return out;
 }
 
+QStringList NetlistTranslator::subcktPorts(const QString &name) const
+{
+    auto ports = [](const QString &header) {
+        QStringList t = header.split(QRegularExpression(QStringLiteral("\\s+")), Qt::SkipEmptyParts).mid(2);
+        QStringList out;
+        for (const QString &p : t) {
+            if (p.contains('=') || p.compare(QLatin1String("params:"), Qt::CaseInsensitive) == 0)
+                break;
+            out << p;
+        }
+        return out;
+    };
+    for (const Subckt &sc : m_subckts)
+        if (sc.name.compare(name, Qt::CaseInsensitive) == 0)
+            return ports(sc.header);
+    for (const QString &l : m_pulledDefs) {
+        const QString tl = l.trimmed();
+        if (!tl.startsWith(QLatin1String(".subckt"), Qt::CaseInsensitive))
+            continue;
+        const QStringList t = tl.split(QRegularExpression(QStringLiteral("\\s+")), Qt::SkipEmptyParts);
+        if (t.size() > 1 && t[1].compare(name, Qt::CaseInsensitive) == 0)
+            return ports(normalizeEquals(tl));
+    }
+    return {};
+}
+
 QStringList NetlistTranslator::translateElement(const QString &rawLine, bool topLevel)
 {
     Q_UNUSED(topLevel);
@@ -1176,6 +1240,59 @@ QStringList NetlistTranslator::translateElement(const QString &rawLine, bool top
             senseLines << QStringLiteral("%1 %2 %3 0").arg(senseSourceName(t[0], term), orig, inner);
             t[term] = inner;
         }
+        line = t.join(' ');
+    }
+    // Subcircuit pin currents (LTspice's Ix(U1:1), Ix(U1:2), ...) come from a 0V source
+    // in series with every pin of a top-level instance.
+    if (topLevel && k == 'X' && senseLines.isEmpty()) {
+        int last = -1;
+        for (int i = 1; i < t.size(); ++i) {
+            if (t[i].compare(QLatin1String("params:"), Qt::CaseInsensitive) == 0)
+                break;
+            if (!t[i].contains('='))
+                last = i;
+        }
+        const QString inst = elementName(t[0]).toLower();
+        // LTspice names the pins after the subcircuit's ports: Ix(u1:mt1), Ix(u2:1).
+        const QStringList ports = last > 0 ? subcktPorts(t[last]) : QStringList();
+        QString shown = t[0];
+        if (const int sect = shown.indexOf(QChar(0xA7)); sect >= 0)
+            shown = shown.mid(sect + 1);
+        else if (shown.startsWith('X', Qt::CaseInsensitive))
+            shown.remove(0, 1);
+        for (int i = 1; i < last; ++i) {
+            const QString inner = internalNode(t[0], 200 + i);
+            const QString src = QStringLiteral("Vlspin_%1_%2").arg(inst).arg(i);
+            senseLines << QStringLiteral("%1 %2 %3 0").arg(src, nodeToken(t[i]), inner);
+            m_res.pinCurrents.insert(src.toLower(), QStringLiteral("Ix(%1:%2)").arg(shown.toLower(), ports.value(i - 1, QString::number(i)).toLower()));
+            t[i] = inner;
+        }
+        line = t.join(' ');
+    }
+    // Special-function devices: LTspice saves I1, I2 (inputs, which draw no current), I6 and
+    // I7 (the outputs) and I8 (common, carrying the outputs' return current).
+    if (topLevel && k == 'A' && t.size() >= 10 && senseLines.isEmpty()) {
+        QString shown = t[0];
+        if (const int sect = shown.indexOf(QChar(0xA7)); sect >= 0)
+            shown = shown.mid(sect + 1);
+        const QString inst = elementName(t[0]).toLower();
+        auto label = [&](int pin) { return QStringLiteral("I%1(%2)").arg(pin).arg(shown); };
+        m_res.derivedCurrents.append({label(1), {}});
+        m_res.derivedCurrents.append({label(2), {}});
+        QStringList outs;
+        for (int pin : {6, 7}) {
+            const QString n = t[pin];
+            if (n == QLatin1String("0") || n.startsWith(QLatin1String("NC_"), Qt::CaseInsensitive) || n == t[8]) {
+                m_res.derivedCurrents.append({label(pin), {}});
+                continue;
+            }
+            const QString inner = internalNode(t[0], 200 + pin);
+            const QString src = QStringLiteral("Vlspin_%1_%2").arg(inst).arg(pin);
+            senseLines << QStringLiteral("%1 %2 %3 0").arg(src, nodeToken(n), inner);
+            m_res.pinCurrents.insert(src.toLower(), label(pin));
+            t[pin] = inner;
+        }
+        m_res.derivedCurrents.append({label(8), {label(6), label(7)}});
         line = t.join(' ');
     }
     if (!senseLines.isEmpty()) {
@@ -1409,10 +1526,14 @@ QStringList NetlistTranslator::translatePassive(const QStringList &t)
             icv = icv.mid(1, icv.size() - 2);
         out << QStringLiteral("B%1_ic %2 %3 I=(time<=0 ? 1e4*(V(%2,%3)-(%4)) : 0)").arg(QString(name).replace(QChar(0xA7), '_'), a, n2, icv);
     }
-    if (!rpar.isEmpty())
+    if (!rpar.isEmpty()) {
         out << QStringLiteral("R%1_rpar %2 %3 %4").arg(name, n1, n2, rpar);
-    if (!cpar.isEmpty() && numberOr(cpar, 1.0) != 0.0)
+        m_res.parallelParts[name.toLower()] << QStringLiteral("r%1_rpar").arg(name.toLower());
+    }
+    if (!cpar.isEmpty() && numberOr(cpar, 1.0) != 0.0) {
         out << QStringLiteral("C%1_cpar %2 %3 %4").arg(name, n1, n2, cpar);
+        m_res.parallelParts[name.toLower()] << QStringLiteral("c%1_cpar").arg(name.toLower());
+    }
     if (!rlshunt.isEmpty() && !lser.isEmpty())
         m_res.warnings << QStringLiteral("%1: RLshunt ignored").arg(t[0]);
     if (k == 'C' && !ic.isEmpty() && !rser.isEmpty())
@@ -1654,10 +1775,14 @@ QStringList NetlistTranslator::translateSource(const QStringList &t)
             spec = QStringLiteral(" DC 0");
         out << QStringLiteral("%1 %2 %3%4").arg(name, a, n2, spec);
     }
-    if (!cpar.isEmpty() && numberOr(cpar, 1) != 0)
+    if (!cpar.isEmpty() && numberOr(cpar, 1) != 0) {
         out << QStringLiteral("C%1_cpar %2 %3 %4").arg(name, n1, n2, cpar);
-    if (!rpar.isEmpty())
+        m_res.parallelParts[name.toLower()] << QStringLiteral("c%1_cpar").arg(name.toLower());
+    }
+    if (!rpar.isEmpty()) {
         out << QStringLiteral("R%1_rpar %2 %3 %4").arg(name, n1, n2, rpar);
+        m_res.parallelParts[name.toLower()] << QStringLiteral("r%1_rpar").arg(name.toLower());
+    }
     return out;
 }
 
@@ -1846,6 +1971,17 @@ QStringList NetlistTranslator::translateSemiconductor(const QStringList &t)
         nodes = 3;
         modelIdx = 4;
         modelType = QStringLiteral("VDMOS");
+    }
+    // ngspice reports a p-channel VDMOS's terminal currents with the opposite sign to LTspice.
+    if (k == 'M' && modelType == QLatin1String("VDMOS")) {
+        static const QRegularExpression pchan(QStringLiteral("\\bpchan\\b"), QRegularExpression::CaseInsensitiveOption);
+        if (pchan.match(m_modelLines.value(out[modelIdx].toLower())).hasMatch())
+            m_res.negatedDevices.insert(out[0].toLower());
+    }
+    if (k == 'Q') {
+        static const QRegularExpression iss(QStringLiteral("\\biss\\s*="), QRegularExpression::CaseInsensitiveOption);
+        if (!iss.match(m_modelLines.value(out[modelIdx].toLower())).hasMatch())
+            m_res.noSubstrateBjts.insert(t[0].toLower());
     }
     if (k == 'Z' && (modelType == QLatin1String("NIGBT") || modelType == QLatin1String("PIGBT")))
         return translateIgbt(t, m_modelLines.value(out[modelIdx].toLower()), modelType == QLatin1String("PIGBT"));
@@ -2282,6 +2418,7 @@ QStringList NetlistTranslator::translateSwitch(const QStringList &t)
                                                                                              : QStringLiteral("((%1) != 0 ? %2 : %3)").arg(vs, oneway, both));
         } else {
             out << QStringLiteral("B%1 %2 %3 I=%4*tanh(%5*V(%2,%3)/%4)").arg(name, a, b, il, g);
+            m_res.negatedDevices.insert(t[0].toLower()); // LTspice's I(S1) flows from n2 to n1
         }
         return out;
     }
@@ -2315,6 +2452,7 @@ QStringList NetlistTranslator::translateSwitch(const QStringList &t)
         ion = QStringLiteral("%1*tanh((%2)/%1)").arg(il, ion);
     }
     out << QStringLiteral("B%1 %2 %3 I=%4+%5/%6").arg(name, a, b, ion, v, roff);
+    m_res.negatedDevices.insert(t[0].toLower()); // LTspice's I(S1) flows from n2 to n1
     if (mp.contains(QStringLiteral("lser")))
         m_res.warnings << QStringLiteral("%1: switch series inductance (Lser) is ignored").arg(t[0]);
     return out;
@@ -2733,9 +2871,13 @@ QString NetlistTranslator::translateAnalysis(const QString &line)
             std::sort(fs.begin(), fs.end());
             const QString head = t.mid(0, 3).join(' ');
             if (fs.size() == 1)
-                return QStringLiteral("%1 lin 1 %2 %2").arg(head).arg(fs[0], 0, 'g', 12);
-            return QStringLiteral("%1 dec 50 %2 %3").arg(head).arg(fs.first(), 0, 'g', 12).arg(fs.last(), 0, 'g', 12);
+                return QStringLiteral("%1 lin 1 %2 %2 1").arg(head).arg(fs[0], 0, 'g', 12);
+            return QStringLiteral("%1 dec 50 %2 %3 1").arg(head).arg(fs.first(), 0, 'g', 12).arg(fs.last(), 0, 'g', 12);
         }
+        // ngspice keeps per-device noise only with a points-per-summary argument, and
+        // only at the summary points, so every point is one.
+        if (t.size() == 7)
+            t << QStringLiteral("1");
         return t.join(' ');
     }
     if (kw == QLatin1String(".tf")) {

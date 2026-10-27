@@ -220,6 +220,9 @@ QList<DatasetPtr> read(const QString &path, QString *error)
         const bool allDouble = flags.contains(QLatin1String("double")) || !hr.utf16; // ngspice always writes doubles
         const bool fastAccess = flags.contains(QLatin1String("fastaccess"));
         ds->kind = kindFromPlotName(ds->plotName);
+        // A stepped operating point is a sweep over the stepped quantity.
+        if (ds->kind == Dataset::Kind::OperatingPoint && nPoints > 1)
+            ds->kind = Dataset::Kind::DCSweep;
         while (ds->vars.size() < nVars)
             ds->vars.append({QStringLiteral("var%1").arg(ds->vars.size()), QString()});
 

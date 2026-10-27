@@ -62,7 +62,11 @@ Waveform viewer: multiple panes, Bode/Nyquist/Cartesian AC display, expressions 
 
 Simulation results are checked against LTspice by running the same examples in both and comparing waveforms (`tools/compare_raw.py`). Of the 80 runnable examples in LTspice's `Educational` folder, 59 match within 1% normalized RMS error and 67 within 5%. LinSpice uses LTspice's documented integration defaults (trapezoidal, `trtol=2`, maximum step Tstop/1024), so free-running oscillators reproduce LTspice's frequency, including its own numerical frequency shift: most LC, RC and multivibrator examples agree within 0.05% and amplitude within 1%. Waveforms of oscillators still separate slowly over hundreds of cycles, because LTspice's own edge timing jitters by about 1% from cycle to cycle and no two simulators reproduce that exactly.
 
+The results contain the same probeable signals as LTspice's, under the same names: node voltages, device and terminal currents (`I(R1)`, `Ic(Q1)`, `Id(M1)`), subcircuit pin currents (`Ix(U1:pin)`, named after the subcircuit's ports), special-function pin currents (`I7(A1)`), inductor flux (`L1:flux`), currents in `.ac` analyses, and every device's noise contribution in `.noise` (`V(R1)`, `V(Q1.rb)`, `gain`). A component's current includes its `Rpar`/`Cpar`, as in LTspice. A stepped `.op` or single-frequency `.noise` is one trace against the stepped value. LinSpice additionally keeps subcircuit-internal signals for probing inside the hierarchy.
+
 Known gaps:
+
+- Transmission line terminal currents other than `Ia` are not available (ngspice's line model doesn't have them).
 
 - The hysteretic core inductor model (`Hc=`, `Br=`, `Bs=`) is treated as a linear inductor.
 - `.machine` state machines, `.savestate`/`.loadstate` and `.savebias` are not supported.

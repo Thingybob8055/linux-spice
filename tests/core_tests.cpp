@@ -193,6 +193,42 @@ static void testTranslator()
         std::fprintf(stderr, "%s\n", qPrintable(r.netlist));
 }
 
+// Vectors LTspice saves that ngspice doesn't by default: subcircuit pin currents, AC
+// device currents, inductor flux, per-device noise.
+static void testProbeableSignals()
+{
+    NetlistTranslator::Options o;
+    o.saveCurrents = true;
+    {
+        const QStringList lt = {"* pins", "V1 in 0 SIN(0 1 1k)", "XU1 in out amp", "L1 out 0 1m Cpar=1p", "A1 in 0 0 0 0 0 q 0 BUF",
+                                ".subckt amp a mt1", "R1 a mt1 1k", ".ends amp", ".tran 1m", ".end"};
+        NetlistTranslator tr;
+        const TranslationResult r = tr.translate(lt, o);
+        CHECK(r.errors.isEmpty());
+        CHECK(r.netlist.contains("Vlspin_xu1_1 in "));
+        CHECK(r.pinCurrents.value("vlspin_xu1_2") == "Ix(u1:mt1)");
+        CHECK(r.pinCurrents.value("vlspin_a1_7") == "I7(A1)");
+        CHECK(r.netlist.contains(".save all @l1[flux]"));
+        CHECK(r.parallelParts.value("l1").contains("cl1_cpar"));
+        if (g_failures)
+            std::fprintf(stderr, "%s\n", qPrintable(r.netlist));
+    }
+    {
+        const QStringList lt = {"* ac", "V1 in 0 AC 1", "R1 in out 1k", "C1 out 0 1u", ".ac dec 10 1 1k", ".end"};
+        NetlistTranslator tr;
+        const TranslationResult r = tr.translate(lt, o);
+        CHECK(r.netlist.contains(".probe i(R1) i(C1)"));
+    }
+    {
+        const QStringList lt = {"* noise", "V1 in 0 AC 1", "R1 in out 1k", "R2 out 0 1k", ".noise V(out) V1 dec 10 1 1k", ".end"};
+        NetlistTranslator tr;
+        const TranslationResult r = tr.translate(lt, o);
+        CHECK(r.netlist.contains(".options noiseall"));
+        CHECK(r.netlist.contains(".noise V(out) V1 dec 10 1 1k 1"));
+        CHECK(!r.netlist.contains("savecurrents"));
+    }
+}
+
 static void testStep()
 {
     StepPlan p;
@@ -379,6 +415,7 @@ int main(int argc, char **argv)
     testExpression();
     testSchematicRoundTrip();
     testTranslator();
+    testProbeableSignals();
     testStep();
     testMeasure();
     if (g_failures) {
