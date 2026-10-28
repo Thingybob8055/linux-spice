@@ -131,5 +131,6 @@ private:
     bool m_thevInduc = false;
     int m_includeDepth = 0;
     bool m_inMachine = false;
+    bool m_inSubckt = false; // translating a subcircuit body (models there are macromodel internals)
     bool m_startup = false;
 };

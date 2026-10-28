@@ -238,6 +238,40 @@ static void testProbeableSignals()
     }
 }
 
+// Op-amp macromodel building blocks (LTspice's AD820 and similar).
+static void testMacromodelParts()
+{
+    NetlistTranslator::Options o;
+    const QStringList lt = {"* parts", "V1 3 0 9", "V2 in 0 1",
+                            // An OTA input wired to node 0 is ground, not the OTA's common node.
+                            "A1 in 0 m m m m x m OTA g=1m", "R1 x 0 1k", "R2 m 0 1k",
+                            // Ideal diode whose Roff is an expression: never folded to a number.
+                            "D5 n 3 X1", ".param Ro=1Meg", ".model X1 D(Ron=1m Roff={2*Ro} Vfwd=-3m epsilon=10m)",
+                            "R3 n 0 1k", ".op", ".end"};
+    NetlistTranslator tr;
+    const TranslationResult r = tr.translate(lt, o);
+    CHECK(r.errors.isEmpty());
+    CHECK(r.netlist.contains("V(0)-V(in)") || r.netlist.contains("V(in)-V(0)"));
+    CHECK(r.netlist.contains("2*Ro"));
+    CHECK(!r.netlist.contains("V(n,3)*0.5"));
+    // A G source with vto/dir is a square-law transconductor.
+    {
+        NetlistTranslator t2;
+        const TranslationResult g = t2.translate({"* g", "V1 c 0 1", "G1 o 0 c 0 100m vto=670m dir=1", "R1 o 0 1", ".op", ".end"}, o);
+        CHECK(g.netlist.contains("uramp((1)*(V(c,0)-(670m)))*uramp((1)*(V(c,0)-(670m)))"));
+    }
+    // A zener's low-level breakdown (Ibvl/Nbvl) becomes a parallel diode.
+    {
+        NetlistTranslator t3;
+        const TranslationResult z = t3.translate({"* z", "I1 0 a 1u", "D1 0 a ZZ", ".model ZZ D(BV=4.7 IBV=20m Ibvl=1.96m Nbvl=15)", ".op", ".end"}, o);
+        CHECK(z.netlist.contains("D1_bvl 0 a D1_bvl"));
+        CHECK(z.netlist.contains("IBV=1.96m NBV=15"));
+        CHECK(!z.netlist.contains("Ibvl"));
+    }
+    if (g_failures)
+        std::fprintf(stderr, "%s\n", qPrintable(r.netlist));
+}
+
 static void testStep()
 {
     StepPlan p;
@@ -246,6 +280,13 @@ static void testStep()
     CHECK(p.runCount() == 9);
     const QStringList out = p.apply({"R1 a b {R}", ".param R=5", ".step param R 1k 3k 1k", ".end"}, 1);
     CHECK(out.join('\n').contains(".param R=2000"));
+    // LTspice ends every sweep on its stop value and sweeps upward (checked in LTspice).
+    StepPlan q;
+    CHECK(q.parse({".step param R 1 10k 1k"}, &err) && q.runCount() == 11 && q.axes()[0].values.last() == 10000);
+    StepPlan o2;
+    CHECK(o2.parse({".step oct param R 1 5 1"}, &err) && o2.axes()[0].values == QVector<double>({1, 2, 4, 5}));
+    StepPlan d;
+    CHECK(d.parse({".step param R 10 1 -4"}, &err) && d.axes()[0].values == QVector<double>({1, 5, 9, 10}));
 }
 
 static void testMeasure()
@@ -425,6 +466,7 @@ int main(int argc, char **argv)
     testSchematicRoundTrip();
     testTranslator();
     testProbeableSignals();
+    testMacromodelParts();
     testStep();
     testMeasure();
     if (g_failures) {

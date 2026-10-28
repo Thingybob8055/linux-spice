@@ -155,11 +155,17 @@ bool StepPlan::parse(const QStringList &lines, QString *error)
                         *error = QStringLiteral("Zero increment in .step");
                     return false;
                 }
-                const double dir = stop >= start ? 1 : -1;
-                inc = std::fabs(inc) * dir;
+                // LTspice always sweeps upward from the smaller value (".step param R 10 1 -4"
+                // runs 1, 5, 9, 10) and ends on the stop value even when the increment doesn't
+                // land on it (".step param R 1 10k 1k" runs 1, 1001, ..., 9001 and then 10k).
+                if (stop < start)
+                    std::swap(start, stop);
+                inc = std::fabs(inc);
                 const int n = int(std::floor((stop - start) / inc + 1e-9)) + 1;
                 for (int i = 0; i < n && i < 100000; ++i)
                     ax.values << start + i * inc;
+                if (!ax.values.isEmpty() && std::fabs(ax.values.last() - stop) > 1e-9 * std::max(std::fabs(stop), inc))
+                    ax.values << stop;
             } else {
                 // inc = points per octave/decade
                 if (start <= 0 || stop <= 0 || inc <= 0) {
@@ -174,6 +180,10 @@ bool StepPlan::parse(const QStringList &lines, QString *error)
                     ax.values << v;
                     v *= ratio;
                 }
+                // As for linear sweeps, LTspice ends on the stop value (".step oct param R 1 5 1"
+                // runs 1, 2, 4, 5).
+                if (!ax.values.isEmpty() && std::fabs(ax.values.last() - stop) > 1e-9 * stop)
+                    ax.values << stop;
             }
         }
         if (ax.values.isEmpty()) {

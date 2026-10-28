@@ -471,6 +471,7 @@ TranslationResult NetlistTranslator::translate(const QStringList &ltLines, const
     elements << floatingNodeShunts(elements);
 
     QStringList subText;
+    m_inSubckt = true;
     for (const Subckt &s : m_subckts) {
         subText << normalizeEquals(s.header);
         for (const QString &l : s.body) {
@@ -486,9 +487,14 @@ TranslationResult NetlistTranslator::translate(const QStringList &ltLines, const
         }
         subText << QStringLiteral(".ends %1").arg(s.name);
     }
+    m_inSubckt = false;
     QStringList pulled;
     for (const QString &l : m_pulledDefs) {
         const QString low = l.trimmed().toLower();
+        if (low.startsWith(QLatin1String(".subckt")))
+            m_inSubckt = true;
+        else if (low.startsWith(QLatin1String(".ends")))
+            m_inSubckt = false;
         if (low.startsWith(QLatin1String(".model")))
             pulled << translateModel(l);
         else if (low.startsWith(QLatin1String(".param")))
@@ -1271,6 +1277,14 @@ QStringList NetlistTranslator::translateElement(const QString &rawLine, bool top
         }
         line = t.join(' ');
     }
+    // A BJT without a substrate junction has Is = 0 in LTspice's AC results too; AC currents come
+    // from probing the terminals, and a three-terminal BJT has no substrate terminal to probe.
+    if (topLevel && k == 'Q' && m_res.analysis == QLatin1String("ac")) {
+        QStringList res = senseLines + translateElementTokens(t, line, k);
+        if (m_res.noSubstrateBjts.contains(t[0].toLower()))
+            m_res.derivedCurrents.append({QStringLiteral("Is(%1)").arg(t[0].section(QChar(0xA7), -1)), {}});
+        return res;
+    }
     // IGBT terminal currents Ic, Ig, Ie: the device is a behavioral model here, so they are
     // measured at its terminals.
     if (topLevel && k == 'Z' && t.size() >= 5 && senseLines.isEmpty()) {
@@ -1551,11 +1565,13 @@ QStringList NetlistTranslator::translatePassive(const QStringList &t)
     }
     if (!rpar.isEmpty()) {
         out << QStringLiteral("R%1_rpar %2 %3 %4").arg(name, n1, n2, rpar);
-        m_res.parallelParts[name.toLower()] << QStringLiteral("r%1_rpar").arg(name.toLower());
+        if (!m_inSubckt) // only top-level devices' currents are saved and probed
+            m_res.parallelParts[name.toLower()] << QStringLiteral("r%1_rpar").arg(name.toLower());
     }
     if (!cpar.isEmpty() && numberOr(cpar, 1.0) != 0.0) {
         out << QStringLiteral("C%1_cpar %2 %3 %4").arg(name, n1, n2, cpar);
-        m_res.parallelParts[name.toLower()] << QStringLiteral("c%1_cpar").arg(name.toLower());
+        if (!m_inSubckt) // only top-level devices' currents are saved and probed
+            m_res.parallelParts[name.toLower()] << QStringLiteral("c%1_cpar").arg(name.toLower());
     }
     if (!rlshunt.isEmpty() && !lser.isEmpty())
         m_res.warnings << QStringLiteral("%1: RLshunt ignored").arg(t[0]);
@@ -1800,11 +1816,13 @@ QStringList NetlistTranslator::translateSource(const QStringList &t)
     }
     if (!cpar.isEmpty() && numberOr(cpar, 1) != 0) {
         out << QStringLiteral("C%1_cpar %2 %3 %4").arg(name, n1, n2, cpar);
-        m_res.parallelParts[name.toLower()] << QStringLiteral("c%1_cpar").arg(name.toLower());
+        if (!m_inSubckt) // only top-level devices' currents are saved and probed
+            m_res.parallelParts[name.toLower()] << QStringLiteral("c%1_cpar").arg(name.toLower());
     }
     if (!rpar.isEmpty()) {
         out << QStringLiteral("R%1_rpar %2 %3 %4").arg(name, n1, n2, rpar);
-        m_res.parallelParts[name.toLower()] << QStringLiteral("r%1_rpar").arg(name.toLower());
+        if (!m_inSubckt) // only top-level devices' currents are saved and probed
+            m_res.parallelParts[name.toLower()] << QStringLiteral("r%1_rpar").arg(name.toLower());
     }
     return out;
 }
@@ -1915,7 +1933,10 @@ QStringList NetlistTranslator::translateControlled(const QStringList &t, const Q
         QStringList nums = tokenize(QString(tbl).replace(',', ' '));
         return {QStringLiteral("B%1 %2 %3 %4=%5").arg(name, n1, n2, bkind, rewriteExpression(QStringLiteral("table(%1,%2)").arg(ctrl, nums.join(','))))};
     }
-    // LTspice "vto=" / "dir=" make a G/E source one-directional above a threshold.
+    // LTspice "vto=" / "dir=" on a G source: a one-directional square-law transconductor,
+    // I = dir*gm*(dir*(V-vto))^2 where dir*(V-vto) > 0, else 0 (measured in LTspice: gm=0.1,
+    // vto=0.67, V=1.2 gives 0.1*0.53^2). LTspice rejects these parameters on E sources; here an E
+    // source keeps a linear characteristic.
     if ((k == 'E' || k == 'G') && t.size() >= 6 && (low.contains(QLatin1String("vto=")) || low.contains(QLatin1String("dir=")))) {
         QHash<QString, QString> named;
         QStringList pos = splitParams(t.mid(5), &named);
@@ -1923,7 +1944,10 @@ QStringList NetlistTranslator::translateControlled(const QStringList &t, const Q
         const QString vto = named.value(QStringLiteral("vto"), QStringLiteral("0"));
         const QString dir = named.value(QStringLiteral("dir"), QStringLiteral("1"));
         const QString ctrl = QStringLiteral("V(%1,%2)").arg(nodeToken(t[3]), nodeToken(t[4]));
-        return {QStringLiteral("B%1 %2 %3 %4=(%5)*(%6)*uramp((%6)*(%7-(%8)))").arg(name, n1, n2, bkind, gain, dir, ctrl, vto)};
+        const QString over = QStringLiteral("uramp((%1)*(%2-(%3)))").arg(dir, ctrl, vto);
+        if (k == 'G')
+            return {QStringLiteral("B%1 %2 %3 %4=(%5)*(%6)*%7*%7").arg(name, n1, n2, bkind, gain, dir, over)};
+        return {QStringLiteral("B%1 %2 %3 %4=(%5)*(%6)*%7").arg(name, n1, n2, bkind, gain, dir, over)};
     }
     if (low.contains(QLatin1String("laplace="))) {
         if (t.size() < 5) {
@@ -1975,9 +1999,15 @@ QStringList NetlistTranslator::translateSemiconductor(const QStringList &t)
     case 'J':
     case 'Z': nodes = 3; break;
     case 'Q':
-    case 'M':
-        nodes = (t.size() > 4 && isKnownModel(t[4])) ? 3 : 4;
+    case 'M': {
+        // Three or four nodes: a fourth node only when the token after it is a word too (the
+        // model). "Q1 c b e 2SC4081" with an undefined model is three nodes and a model name.
+        int words = 0;
+        for (int i = 1; i < t.size() && !t[i].contains('='); ++i)
+            ++words;
+        nodes = (t.size() > 4 && isKnownModel(t[4])) ? 3 : (words >= 5 ? 4 : 3);
         break;
+    }
     }
     for (int i = 1; i <= nodes && i < out.size(); ++i)
         out[i] = nodeToken(out[i]);
@@ -2043,7 +2073,37 @@ QStringList NetlistTranslator::translateSemiconductor(const QStringList &t)
     }
     QStringList res = out.mid(0, modelIdx + 1);
     res << params;
-    return {res.join(' ')};
+    QStringList lines{res.join(' ')};
+    // LTspice's diode has a second, low-level breakdown term Ibvl*exp(-(V+BV)/(Nbvl*Vt)) that sets a
+    // zener's voltage at small currents (a 1N750 at 1uA: 1.76V, not 4.26V); ngspice's diode has no
+    // such parameters. A second diode in parallel carries just that term: same BV, IBV=Ibvl,
+    // NBV=Nbvl and a negligible saturation current.
+    if (k == 'D') {
+        const QString modelLine = m_modelLines.value(out[modelIdx].toLower());
+        static const QRegularExpression ibvlRe(QStringLiteral("\\bibvl\\s*=\\s*([^\\s)]+)"), QRegularExpression::CaseInsensitiveOption);
+        static const QRegularExpression nbvlRe(QStringLiteral("\\bnbvl\\s*=\\s*([^\\s)]+)"), QRegularExpression::CaseInsensitiveOption);
+        static const QRegularExpression bvRe(QStringLiteral("\\bbv\\s*=\\s*([^\\s)]+)"), QRegularExpression::CaseInsensitiveOption);
+        static const QRegularExpression tbvRe(QStringLiteral("\\b(tbv1|tbv2)\\s*=\\s*([^\\s)]+)"), QRegularExpression::CaseInsensitiveOption);
+        const auto ib = ibvlRe.match(modelLine), bv = bvRe.match(modelLine);
+        if (ib.hasMatch() && bv.hasMatch()) {
+            const auto nb = nbvlRe.match(modelLine);
+            QString extra = QStringLiteral("Is=1e-30 BV=%1 IBV=%2 NBV=%3").arg(bv.captured(1), ib.captured(1), nb.hasMatch() ? nb.captured(1) : QStringLiteral("1"));
+            auto it = tbvRe.globalMatch(modelLine);
+            while (it.hasNext()) {
+                const auto m = it.next();
+                extra += QStringLiteral(" %1=%2").arg(m.captured(1), m.captured(2));
+            }
+            const QString bvlModel = QStringLiteral("%1_bvl").arg(out[0]);
+            lines << QStringLiteral(".model %1 D(%2)").arg(bvlModel, extra);
+            QStringList twin = res;
+            twin[0] = QStringLiteral("%1_bvl").arg(out[0]);
+            twin[modelIdx] = bvlModel;
+            lines << twin.join(' ');
+            if (!m_inSubckt)
+                m_res.parallelParts[out[0].toLower()] << twin[0].toLower();
+        }
+    }
+    return lines;
 }
 
 QStringList NetlistTranslator::translateDigital(const QStringList &t)
@@ -2205,7 +2265,10 @@ QStringList NetlistTranslator::translateDigital(const QStringList &t)
                 linear = true;
         const QString g = pv("g", QStringLiteral("1"));
         const QString ref = pv("ref", QStringLiteral("0"));
-        const QString inn = pin(1), inp = pin(2), m1 = pin(3), m2 = pin(4), vneg = pin(5), vpos = pin(6);
+        // A signal input wired to node 0 is ground (not "unconnected", as for logic inputs): the
+        // op-amp macromodels drive "A1 in 0 ..." single-ended.
+        auto signalPin = [&](int idx) { return t[idx] == QLatin1String("0") ? QStringLiteral("0") : pin(idx); };
+        const QString inn = signalPin(1), inp = signalPin(2), m1 = pin(3), m2 = pin(4), vneg = pin(5), vpos = pin(6);
         const QString outN = t[7] == QLatin1String("0") ? QString() : nodeToken(t[7]);
         if (outN.isEmpty())
             return out;
@@ -2511,29 +2574,67 @@ QStringList NetlistTranslator::translateIdealDiode(const QStringList &t, const Q
         else if (lp.startsWith(QLatin1String("n="))) n = t[i].mid(2);
         else if (isNumeric(t[i])) m = t[i]; // area
     }
+    // The expression is kept as small as the model allows: ngspice differentiates every behavioral
+    // expression symbolically at each evaluation, so terms that are identically zero for this model
+    // (no Vrev, epsilon=0) and constants left unfolded multiply the cost of every time step
+    // (op-amp macromodels hold several of these diodes each).
+    // A value folds to a constant only when it is entirely a number ("2*Ro" is not 2).
+    auto number = [&](const QString &key) -> std::optional<double> {
+        QString v = mp.value(key).trimmed();
+        if (units::isBraced(v))
+            v = v.mid(1, v.size() - 2).trimmed();
+        if (v.isEmpty() || !isNumeric(v))
+            return std::nullopt;
+        return units::parseSpiceNumber(v);
+    };
+    auto lit = [](double x) { return QString::number(x, 'g', 15); };
     const QString ron = val(QStringLiteral("ron"), QStringLiteral("1"));
     const QString roff = val(QStringLiteral("roff"), QStringLiteral("1e12"));
-    const QString vfwd = val(QStringLiteral("vfwd"), QStringLiteral("0"));
-    const QString vrev = val(QStringLiteral("vrev"), QStringLiteral("1e30"));
     const QString rrev = mp.contains(QStringLiteral("rrev")) ? val(QStringLiteral("rrev"), QStringLiteral("1")) : ron;
-    const QString eps = QStringLiteral("max(abs(%1),1e-9)").arg(val(QStringLiteral("epsilon"), QStringLiteral("0")));
-    const QString reps = QStringLiteral("max(abs(%1),1e-9)").arg(val(QStringLiteral("revepsilon"), QStringLiteral("0")));
-    const QString v = QStringLiteral("(V(%1,%2)/(%3))").arg(a, c, n);
-    // Smooth ramp: 0 below 0, quadratic over [0, e], linear above.
-    auto ramp = [](const QString &x, const QString &e) {
-        return QStringLiteral("((%1)<=0 ? 0 : ((%1)>=%2 ? (%1)-%2/2 : (%1)*(%1)/(2*%2)))").arg(x, e);
+    // Conductance step 1/Ron - 1/Roff, folded when both are numbers.
+    auto gstep = [&](const QString &rkey, const QString &rexpr) {
+        const auto r = number(mp.contains(rkey) ? rkey : QStringLiteral("ron"));
+        const auto ro = mp.contains(QStringLiteral("roff")) ? number(QStringLiteral("roff")) : std::optional<double>(1e12);
+        const bool rDefault = !mp.contains(rkey) && !mp.contains(QStringLiteral("ron"));
+        if ((r || rDefault) && ro)
+            return lit(1.0 / (rDefault ? 1.0 : *r) - 1.0 / *ro);
+        return QStringLiteral("(1/%1-1/%2)").arg(rexpr, roff);
     };
-    QString fwd = QStringLiteral("(1/%1-1/%2)*%3").arg(ron, roff, ramp(QStringLiteral("%1-%2").arg(v, vfwd), eps));
-    QString rev = QStringLiteral("(1/%1-1/%2)*%3").arg(rrev, roff, ramp(QStringLiteral("-%1-%2").arg(v, vrev), reps));
+    const bool unitN = n.trimmed() == QLatin1String("1");
+    const QString v = unitN ? QStringLiteral("V(%1,%2)").arg(a, c) : QStringLiteral("(V(%1,%2)/(%3))").arg(a, c, n);
+    // Smooth ramp: 0 below 0, quadratic over [0, e], linear above; with e = 0 simply max(x,0).
+    auto ramp = [&](const QString &x, const QString &epsKey) {
+        const auto e = number(epsKey);
+        if (!mp.contains(epsKey) || (e && *e == 0))
+            return QStringLiteral("max(%1,0)").arg(x);
+        const QString ee = e ? lit(std::abs(*e)) : QStringLiteral("max(abs(%1),1e-9)").arg(val(epsKey, QStringLiteral("0")));
+        return QStringLiteral("((%1)<=0 ? 0 : ((%1)>=%2 ? (%1)-%2/2 : (%1)*(%1)/(2*%2)))").arg(x, ee);
+    };
+    auto minus = [&](const QString &x, const QString &key) {
+        const auto k = number(key);
+        if (!mp.contains(key) || (k && *k == 0))
+            return x;
+        return QStringLiteral("%1-%2").arg(x, k ? QStringLiteral("(%1)").arg(lit(*k)) : val(key, QStringLiteral("0")));
+    };
+    QString fwd = QStringLiteral("%1*%2").arg(gstep(QStringLiteral("ron"), ron), ramp(minus(v, QStringLiteral("vfwd")), QStringLiteral("epsilon")));
     if (mp.contains(QStringLiteral("ilimit"))) {
         const QString il = val(QStringLiteral("ilimit"), QStringLiteral("1e30"));
         fwd = QStringLiteral("%1*tanh((%2)/%1)").arg(il, fwd);
     }
-    if (mp.contains(QStringLiteral("revilimit"))) {
-        const QString il = val(QStringLiteral("revilimit"), QStringLiteral("1e30"));
-        rev = QStringLiteral("%1*tanh((%2)/%1)").arg(il, rev);
+    QString expr = fwd;
+    // Reverse breakdown only exists when the model gives Vrev.
+    if (mp.contains(QStringLiteral("vrev"))) {
+        QString rev = QStringLiteral("%1*%2").arg(gstep(QStringLiteral("rrev"), rrev), ramp(minus(QStringLiteral("-") + v, QStringLiteral("vrev")), QStringLiteral("revepsilon")));
+        if (mp.contains(QStringLiteral("revilimit"))) {
+            const QString il = val(QStringLiteral("revilimit"), QStringLiteral("1e30"));
+            rev = QStringLiteral("%1*tanh((%2)/%1)").arg(il, rev);
+        }
+        expr += QStringLiteral("-") + rev;
     }
-    return {QStringLiteral("B%1 %2 %3 I=(%4)*(%5-%6+%7/%8)").arg(name, a, c, m, fwd, rev, v, roff)};
+    const auto roffNum = mp.contains(QStringLiteral("roff")) ? number(QStringLiteral("roff")) : std::optional<double>(1e12);
+    expr += roffNum ? QStringLiteral("+%1*%2").arg(v, lit(1.0 / *roffNum)) : QStringLiteral("+%1/%2").arg(v, roff);
+    const bool unitM = m.trimmed() == QLatin1String("1");
+    return {unitM ? QStringLiteral("B%1 %2 %3 I=%4").arg(name, a, c, expr) : QStringLiteral("B%1 %2 %3 I=(%4)*(%5)").arg(name, a, c, m, expr)};
 }
 
 QStringList NetlistTranslator::laplaceSource(const QString &name, QChar kind, const QString &n1, const QString &n2, const QString &input,
@@ -2704,11 +2805,23 @@ QString NetlistTranslator::translateModel(const QString &lineIn)
     static const QRegularExpression igbtRe(QStringLiteral("^\\.model\\s+\\S+\\s+[NP]IGBT\\b"), QRegularExpression::CaseInsensitiveOption);
     if (igbtRe.match(line).hasMatch())
         return QStringLiteral("* ") + line;
+    // Low-level breakdown (Ibvl/Nbvl) is modelled by a parallel diode per instance; ngspice
+    // doesn't know the parameters.
+    {
+        static const QRegularExpression bvl(QStringLiteral("\\s*\\b(ibvl|nbvl)\\s*=\\s*[^\\s)]+"), QRegularExpression::CaseInsensitiveOption);
+        line.remove(bvl);
+    }
     // Model type aliases.
     static const QRegularExpression typeRe(QStringLiteral("^(\\.model\\s+\\S+\\s+)(LPNP)\\b"), QRegularExpression::CaseInsensitiveOption);
     line.replace(typeRe, QStringLiteral("\\1PNP"));
     // LTspice's VDMOS has no gate or body-diode capacitance unless given;
-    // ngspice's defaults are non-zero.
+    // ngspice's defaults are non-zero. Nor does it conduct below threshold (a pure square law; at
+    // Vgs = Vto - 50mV LTspice gives only gmin leakage), where ngspice's default subthreshold slope
+    // (0.1) passes microamps and ruins the transconductance of op-amp macromodel input pairs biased
+    // just above threshold (the LT1008's gain-bandwidth came out 2.6x low). A smaller slope matches
+    // LTspice but ngspice's subthreshold term overflows beyond about 700*ksubthres volts of gate
+    // overdrive, so it is applied only inside subcircuits, where macromodel gates are clamped:
+    // 0.02 keeps Vgs within 2mV of LTspice from 7uA up and allows 14V of overdrive.
     {
         static const QRegularExpression vd(QStringLiteral("^\\.model\\s+\\S+\\s+VDMOS\\b"), QRegularExpression::CaseInsensitiveOption);
         if (vd.match(line).hasMatch()) {
@@ -2716,6 +2829,8 @@ QString NetlistTranslator::translateModel(const QString &lineIn)
             for (const char *k : {"cgdmax", "cgdmin", "cgs", "cjo"})
                 if (!line.contains(QRegularExpression(QStringLiteral("\\b%1\\s*=").arg(QLatin1String(k)), QRegularExpression::CaseInsensitiveOption)))
                     add << QStringLiteral("%1=0").arg(QLatin1String(k));
+            if (m_inSubckt && !line.contains(QRegularExpression(QStringLiteral("\\bksubthres\\s*="), QRegularExpression::CaseInsensitiveOption)))
+                add << QStringLiteral("ksubthres=0.02");
             if (!add.isEmpty()) {
                 if (line.contains(')'))
                     line.insert(line.lastIndexOf(')'), ' ' + add.join(' '));
@@ -3064,6 +3179,7 @@ QStringList NetlistTranslator::floatingNodeShunts(const QStringList &elements)
     };
     auto node = [](const QStringList &t, int i) { return t[i].toLower() == QLatin1String("gnd") ? QStringLiteral("0") : t[i].toLower(); };
     see(QStringLiteral("0"));
+    QList<QPair<QString, QString>> capEdges, icEdges;
     for (const QString &l : elements) {
         const QStringList t = tokenize(l);
         if (t.isEmpty() || l.startsWith('*') || l.startsWith('.'))
@@ -3082,7 +3198,18 @@ QStringList NetlistTranslator::floatingNodeShunts(const QStringList &elements)
                 join(ns[0], ns[i]);
         };
         switch (k.unicode()) {
-        case 'C':
+        case 'C': {
+            const QStringList ns = nodes(2); // no DC path between the terminals
+            if (ns.size() == 2) {
+                // A capacitor with an initial condition is held at it during the operating point
+                // (see translatePassive): its far side then needs no path of its own.
+                if (l.contains(QRegularExpression(QStringLiteral("\\bic\\s*="), QRegularExpression::CaseInsensitiveOption)))
+                    icEdges.append({ns[0], ns[1]});
+                else
+                    capEdges.append({ns[0], ns[1]});
+            }
+            break;
+        }
         case 'I':
         case 'G':
         case 'F':
@@ -3154,8 +3281,27 @@ QStringList NetlistTranslator::floatingNodeShunts(const QStringList &elements)
     }
     QStringList out;
     QSet<QString> done;
-    const QString ground = find(QStringLiteral("0"));
     int idx = 0;
+    // A node reached only through capacitors settles, in LTspice, at the voltage on the far side
+    // of the capacitor (which holds no DC voltage), not at ground: the DC path goes across the
+    // capacitor. Repeat so that chains of capacitors resolve towards a DC-tied node. A capacitor
+    // with ic= already fixes its far side during the operating point; adding a path there changes
+    // what LTspice gives (Electrometer), so such nodes get none.
+    for (const auto &[a, b] : icEdges)
+        join(a, b);
+    for (bool changed = true; changed;) {
+        changed = false;
+        const QString gnd = find(QStringLiteral("0"));
+        for (const auto &[a, b] : capEdges) {
+            const QString ra = find(a), rb = find(b);
+            if (ra == rb || (ra != gnd && rb != gnd))
+                continue; // same group already, or neither side has a DC path yet
+            out << QStringLiteral("R__dcpath%1 %2 %3 1T").arg(++idx).arg(a, b);
+            join(a, b);
+            changed = true;
+        }
+    }
+    const QString ground = find(QStringLiteral("0"));
     for (const QString &n : order) {
         const QString r = find(n);
         if (r == ground || done.contains(r))

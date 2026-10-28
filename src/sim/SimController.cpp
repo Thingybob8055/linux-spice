@@ -633,7 +633,8 @@ void SimController::assemble()
             if (ti < 0)
                 continue;
             for (const QString &h : it.value()) {
-                const QStringList forms = {QStringLiteral("@%1[i]").arg(h), QStringLiteral("%1#branch").arg(h), QStringLiteral("i(%1)").arg(h)};
+                const QStringList forms = {QStringLiteral("@%1[i]").arg(h), QStringLiteral("@%1[id]").arg(h), QStringLiteral("%1#branch").arg(h),
+                                           QStringLiteral("i(%1)").arg(h)};
                 for (int v = 0; v < main->vars.size(); ++v) {
                     if (!forms.contains(main->vars[v].name.toLower()))
                         continue;

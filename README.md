@@ -78,6 +78,9 @@ Of the 82 `Educational` examples, 80 run in LinSpice. Of those, 59 match LTspice
 | Laplace sources | Rational transfer functions, `exp(-s*T)` delays and fractional powers such as `1/sqrt(1+s*tau)`. Fractional powers are within 0.004 dB and 0.014° of the exact response. In the time domain this is closer to exact than LTspice: in `HalfSlope`'s tail, LTspice is 4–19% off the exact answer and LinSpice is within 1%. |
 | IGBT | Hefner's published model (the one LTspice uses), checked against LTspice with six parameter sets and two load types. DC curves are within 0.03%, on-state voltage within 0.15%, and switching delays, rise and fall times within 2%. |
 | Oscillators | LC, RC and multivibrator examples oscillate at LTspice's frequency within 0.05% (including LTspice's own numerical frequency shift), with amplitude within 1%. |
+| Guitar pedals | Nine pedal simulations from [Cushychicken/ltspice-guitar-pedals](https://github.com/Cushychicken/ltspice-guitar-pedals): TS808 Tube Screamer, Big Cheese fuzz, Crybaby wah and Boss GE-7 EQ within 0.004 dB of LTspice across their swept settings; ProCo RAT within 0.9 dB (its LT1008 op-amp model's bandwidth is ~9% low at 1 MHz); Green Ringer and Schaller tremolo waveforms within 0.07%; Colorsound Phase-X LFO frequency within 0.3% and bias voltages within 1 mV. |
+| Op-amp macromodels | LTspice-library op-amps built from its special devices: OTAs, ideal diodes, thresholded square-law current sources, VDMOS without subthreshold conduction. An AD820 buffer matches LTspice's output within 0.1 mV and its supply current within 0.2%. |
+| Zener diodes | Low-current breakdown (`Ibvl`, `Nbvl`) included: a 1N750 is within 3 mV of LTspice from 1 µA to 20 mA. |
 | Other features | `.step` (all forms), Monte Carlo functions, `.meas`, `.four`, `.wave`, `wavefile=` sources (`wavein` matches exactly), `.fra` (within 0.3 dB in `fra_eg1`), `.net` two-port parameters, and LTspice's default component values and model defaults where they differ from ngspice's. |
 
 ### Differs from LTspice
@@ -92,7 +95,8 @@ Of the 82 `Educational` examples, 80 run in LinSpice. Of those, 59 match LTspice
 - **Laplace current source current:** LTspice's `I(G1)` can differ from the current the source actually delivers. In `HalfSlope` it violates Kirchhoff's current law. LinSpice reports the delivered current.
 - **Extra signals.** LinSpice also saves subcircuit-internal signals (for probing inside the hierarchy) and the currents of ideal op-amp input pins (zero), which LTspice omits. It ignores `.save` and saves everything.
 - **Currents that are effectively zero** (picoamps and below) differ by roundoff.
-- **Speed.** ngspice is slower than LTspice on some large behavioral circuits and on IGBT DC sweeps.
+- **Speed.** ngspice is slower than LTspice on some large behavioral circuits and on IGBT DC sweeps. Circuits with several op-amp macromodels built from LTspice's special devices are the worst case: the Colorsound Phase-X (six AD820s, one second of audio) takes about 8 minutes where LTspice takes 47 s.
+- **Missing symbols.** When a schematic uses a symbol that isn't installed, LinSpice stops with an error naming it. LTspice silently leaves the part out of the circuit and simulates the rest (the MXR Dyna Comp download is missing its LM13700 symbol: LTspice "runs" it without the chip).
 
 ### Not supported
 
