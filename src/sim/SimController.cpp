@@ -347,12 +347,12 @@ void SimController::onFinished(Job &job, int code)
             const QList<DatasetPtr> plots = rawfile::read(job.rawPath, &err);
             const int ring = plots.isEmpty() ? 0 : ringingRun(*plots.first());
             if (ring >= 25 && f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-                text.replace(QLatin1String("\n.options trtol=2\n"), QLatin1String("\n.options trtol=1\n"));
+                text.replace(QLatin1String("\n.options trtol=2\n"), QLatin1String("\n.options trtol=0.5\n"));
                 f.write(text.toUtf8());
                 f.close();
                 if (!job.originalNetlist.isEmpty())
-                    job.originalNetlist.replace(QLatin1String("\n.options trtol=2\n"), QLatin1String("\n.options trtol=1\n"));
-                job.log += QStringLiteral("\n*** Integration ringing after a fast edge (%1 steps); rerunning with .options trtol=1 ***\n").arg(ring);
+                    job.originalNetlist.replace(QLatin1String("\n.options trtol=2\n"), QLatin1String("\n.options trtol=0.5\n"));
+                job.log += QStringLiteral("\n*** Integration ringing after a fast edge (%1 steps); rerunning with .options trtol=0.5 ***\n").arg(ring);
                 job.proc = nullptr;
                 job.exitCode = -1;
                 job.percent = 0;
