@@ -179,6 +179,9 @@ QList<DatasetPtr> read(const QString &path, QString *error)
         ds->sourceFile = path;
         int nVars = 0, nPoints = 0;
         QString flags;
+        // LTspice stores a transient that saves from a start time (".tran 0 3 2.95") with times
+        // relative to it and the start in "Offset:".
+        double timeOffset = 0;
         QStringList stepLabels;
         bool gotData = false, binary = false;
         QString line;
@@ -206,6 +209,7 @@ QList<DatasetPtr> read(const QString &path, QString *error)
             else if (key == QLatin1String("no. variables")) nVars = val.toInt();
             else if (key == QLatin1String("no. points")) nPoints = val.toInt();
             else if (key == QLatin1String("command")) ds->command = val;
+            else if (key == QLatin1String("offset")) timeOffset = val.toDouble();
             else if (key == QLatin1String("steps")) stepLabels = val.split(QStringLiteral("; "));
             else if (key == QLatin1String("variables")) inVars = true;
             else if (key == QLatin1String("binary")) { binary = true; gotData = true; break; }
@@ -323,6 +327,9 @@ QList<DatasetPtr> read(const QString &path, QString *error)
                 }
             }
         }
+        if (timeOffset != 0 && ds->kind == Dataset::Kind::Transient && !run.re.isEmpty())
+            for (double &t : run.re[0])
+                t += timeOffset;
         // For AC data the frequency is stored as complex with zero imaginary part.
         ds->runs.append(run);
         ds->rebuildIndex();

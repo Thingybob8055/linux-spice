@@ -35,6 +35,7 @@ def read_raw(path):
     names = []
     in_vars = False
     plot = ""
+    offset = 0.0
     for line in header.splitlines():
         if in_vars:
             parts = line.split()
@@ -54,6 +55,8 @@ def read_raw(path):
             flags = val.strip().lower()
         elif key == "plotname":
             plot = val.strip()
+        elif key == "offset":
+            offset = float(val)
         elif key == "variables":
             in_vars = True
     complex_ = "complex" in flags
@@ -74,7 +77,8 @@ def read_raw(path):
         fmt = "<d" + ("d" if double else "f") * (nvars - 1)
         for p in range(min(npts, len(body) // row)):
             vals = struct.unpack_from(fmt, body, p * row)
-            cols[0].append(abs(vals[0]) if "transient" in plot.lower() else vals[0])
+            # LTspice: times relative to the saved start, which is in "Offset:"
+            cols[0].append(abs(vals[0]) + offset if "transient" in plot.lower() else vals[0])
             for v in range(1, nvars):
                 cols[v].append(vals[v])
     # Split steps where the sweep variable restarts.

@@ -19,10 +19,20 @@ struct PointHash {
 
 } // namespace
 
+// LTspice writes a newline in schematic text as "\n" and a backslash as "\\"
+// (".lib ..\\models\\x.lib" in the file is ".lib ..\models\x.lib").
 QString unescapeText(const QString &s)
 {
-    QString out = s;
-    out.replace(QLatin1String("\\n"), QLatin1String("\n"));
+    QString out;
+    out.reserve(s.size());
+    for (int i = 0; i < s.size(); ++i) {
+        if (s[i] == '\\' && i + 1 < s.size() && (s[i + 1] == 'n' || s[i + 1] == '\\')) {
+            out += s[i + 1] == 'n' ? QChar('\n') : QChar('\\');
+            ++i;
+        } else {
+            out += s[i];
+        }
+    }
     return out;
 }
 
@@ -30,6 +40,7 @@ QString escapeText(const QString &s)
 {
     QString out = s;
     out.replace(QLatin1String("\r\n"), QLatin1String("\n"));
+    out.replace('\\', QLatin1String("\\\\"));
     out.replace('\n', QLatin1String("\\n"));
     return out;
 }

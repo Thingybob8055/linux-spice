@@ -9,6 +9,8 @@
 #include <cstring>
 #include <functional>
 #include <QDir>
+#include <QSaveFile>
+#include <QCryptographicHash>
 #include <QFileInfo>
 #include <QRegularExpression>
 
@@ -1629,6 +1631,8 @@ QStringList NetlistTranslator::translateSource(const QStringList &t)
     const QString name = elementName(t[0]);
     const QString n1 = nodeToken(t[1]), n2 = nodeToken(t[2]);
     QString dc, acMag, acPhase, func, rser, cpar, rpar;
+    QString wavStream; // long .wav input streamed from this file (see wavStreamFile)
+    double wavRate = 0;
     bool load = false;
     QStringList rest = t.mid(3);
     for (QString &tok : rest)
@@ -1772,7 +1776,10 @@ QStringList NetlistTranslator::translateSource(const QStringList &t)
             for (const QString &o : rest)
                 if (o.toLower().startsWith(QLatin1String("chan=")))
                     chan = int(numberOr(o.mid(5), 0));
-            func = QStringLiteral("PWL(%1)").arg(pwlFromWav(tok.mid(9), chan));
+            if (k == 'V')
+                wavStream = wavStreamFile(tok.mid(9), chan, &wavRate);
+            if (wavStream.isEmpty())
+                func = QStringLiteral("PWL(%1)").arg(pwlFromWav(tok.mid(9), chan));
         } else if (lowt.startsWith(QLatin1String("tbl=")) || lowt.startsWith(QLatin1String("trigger="))) {
             m_res.warnings << QStringLiteral("%1: \"%2\" sources are not supported; using 0").arg(t[0], tok.section('=', 0, 0));
             dc = QStringLiteral("0");
@@ -1813,6 +1820,25 @@ QStringList NetlistTranslator::translateSource(const QStringList &t)
         if (spec.isEmpty())
             spec = QStringLiteral(" DC 0");
         out << QStringLiteral("%1 %2 %3%4").arg(name, a, n2, spec);
+    }
+    if (!wavStream.isEmpty()) {
+        // The source becomes a 0V sense source (keeping its name and current) in series with an
+        // XSPICE filesource; the time step is held to one sample period so every sample is seen.
+        const QString inner = internalNode(t[0], 71);
+        for (QString &l : out) {
+            QStringList lt = l.split(' ');
+            if (lt.size() >= 3 && lt[0] == name) {
+                const QString minus = lt[2];
+                l = QStringLiteral("%1 %2 %3 DC 0").arg(name, lt[1], inner);
+                out << QStringLiteral("A%1_wav %vd([%2 %3]) %1_wavsrc").arg(name, inner, minus);
+                out << QStringLiteral(".model %1_wavsrc filesource (file=\"%2\" amploffset=[0] amplscale=[1] timeoffset=0 timescale=1 "
+                                      "timerelative=false amplstep=false)").arg(name, wavStream);
+                break;
+            }
+        }
+        const double sample = 1.0 / wavRate;
+        if (m_deviceMaxStep <= 0 || sample < m_deviceMaxStep)
+            m_deviceMaxStep = sample;
     }
     if (!cpar.isEmpty() && numberOr(cpar, 1) != 0) {
         out << QStringLiteral("C%1_cpar %2 %3 %4").arg(name, n1, n2, cpar);
@@ -3516,6 +3542,50 @@ QStringList NetlistTranslator::translateIgbt(const QStringList &t, const QString
 
 QString NetlistTranslator::pwlFromWav(const QString &fileIn, int channel)
 {
+    QVector<double> samples;
+    double rate = 0;
+    if (!readWav(fileIn, channel, &samples, &rate) || samples.isEmpty())
+        return QStringLiteral("0 0");
+    QStringList pts;
+    pts.reserve(samples.size());
+    for (qsizetype k = 0; k < samples.size(); ++k)
+        pts << QStringLiteral("%1 %2").arg(double(k) / rate, 0, 'g', 12).arg(samples[k], 0, 'g', 7);
+    return pts.join(' ');
+}
+
+// A long .wav input (a whole guitar take) as a PWL source makes ngspice search the point list at
+// every time step and holds it all in the netlist, which grows quadratically: 20s at 44.1kHz
+// took over an hour. XSPICE's filesource reads the samples sequentially from a file instead.
+QString NetlistTranslator::wavStreamFile(const QString &fileIn, int channel, double *rate)
+{
+    QVector<double> samples;
+    if (!readWav(fileIn, channel, &samples, rate) || samples.size() <= 20000)
+        return QString();
+    QString file = fileIn;
+    if (file.startsWith('"') && file.endsWith('"'))
+        file = file.mid(1, file.size() - 2);
+    const QFileInfo src(QFileInfo(file).isAbsolute() ? file : QDir(m_opts.baseDir).filePath(QString(file).replace('\\', '/')));
+    const QByteArray key = (src.absoluteFilePath() + '|' + QString::number(src.lastModified().toMSecsSinceEpoch()) + '|'
+                            + QString::number(channel)).toUtf8();
+    const QString path = QDir::temp().filePath(QStringLiteral("linspice-wav-%1.txt")
+                                                  .arg(QString::fromLatin1(QCryptographicHash::hash(key, QCryptographicHash::Sha1).toHex().left(16))));
+    if (!QFileInfo::exists(path)) {
+        QSaveFile out(path);
+        if (!out.open(QIODevice::WriteOnly))
+            return QString();
+        QByteArray text;
+        text.reserve(samples.size() * 24);
+        for (qsizetype k = 0; k < samples.size(); ++k)
+            text += QByteArray::number(double(k) / *rate, 'g', 12) + ' ' + QByteArray::number(samples[k], 'g', 7) + '\n';
+        out.write(text);
+        if (!out.commit())
+            return QString();
+    }
+    return path;
+}
+
+bool NetlistTranslator::readWav(const QString &fileIn, int channel, QVector<double> *samples, double *rateOut)
+{
     // LTspice plays a .wav file as a voltage: full scale is +-1V (8-bit samples map to
     // (b-128)/127), sample k at time k/rate.
     QString file = fileIn;
@@ -3527,14 +3597,14 @@ QString NetlistTranslator::pwlFromWav(const QString &fileIn, int channel)
     QFile f(path);
     if (!f.open(QIODevice::ReadOnly)) {
         m_res.errors << QStringLiteral("Cannot open wave file \"%1\"").arg(fileIn);
-        return QStringLiteral("0 0");
+        return false;
     }
     const QByteArray d = f.readAll();
     auto u16 = [&d](qsizetype i) { return quint16(quint8(d[i]) | quint8(d[i + 1]) << 8); };
     auto u32 = [&u16](qsizetype i) { return quint32(u16(i)) | quint32(u16(i + 2)) << 16; };
     if (d.size() < 12 || !d.startsWith("RIFF") || d.mid(8, 4) != "WAVE") {
         m_res.errors << QStringLiteral("\"%1\" is not a WAV file").arg(fileIn);
-        return QStringLiteral("0 0");
+        return false;
     }
     int format = 0, channels = 0, bits = 0;
     quint32 rate = 0;
@@ -3559,12 +3629,13 @@ QString NetlistTranslator::pwlFromWav(const QString &fileIn, int channel)
     const int bytes = bits / 8;
     if (dataPos < 0 || rate == 0 || channels <= 0 || bytes <= 0 || (format != 1 && format != 3)) {
         m_res.errors << QStringLiteral("Unsupported WAV format in \"%1\"").arg(fileIn);
-        return QStringLiteral("0 0");
+        return false;
     }
     channel = std::clamp(channel, 0, channels - 1);
     const qsizetype frames = dataLen / (qsizetype(bytes) * channels);
-    QStringList pts;
-    pts.reserve(frames);
+    samples->clear();
+    samples->reserve(frames);
+    *rateOut = rate;
     for (qsizetype k = 0; k < frames; ++k) {
         const qsizetype at = dataPos + (k * channels + channel) * bytes;
         double v = 0;
@@ -3583,9 +3654,9 @@ QString NetlistTranslator::pwlFromWav(const QString &fileIn, int channel)
             iv = (iv ^ sign) - sign; // sign-extend
             v = double(iv) / double(sign - 1);
         }
-        pts << QStringLiteral("%1 %2").arg(double(k) / rate, 0, 'g', 12).arg(v, 0, 'g', 7);
+        *samples << v;
     }
-    return pts.isEmpty() ? QStringLiteral("0 0") : pts.join(' ');
+    return true;
 }
 
 QStringList NetlistTranslator::translateFraAnalyzer(const QStringList &t)

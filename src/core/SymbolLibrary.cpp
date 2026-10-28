@@ -119,6 +119,13 @@ QString SymbolLibrary::findInDir(const QString &dir, const QString &relName) con
     QString cur = dir;
     for (int i = 0; i < parts.size(); ++i) {
         const bool last = (i == parts.size() - 1);
+        // Relative paths such as "..\custom_components\1N60P" step out of the schematic's folder.
+        if (!last && parts[i] == QLatin1String("."))
+            continue;
+        if (!last && parts[i] == QLatin1String("..")) {
+            cur = QFileInfo(cur).absolutePath();
+            continue;
+        }
         const QString match = last ? DirCache::match(cur, parts[i] + QStringLiteral(".asy"))
                                    : DirCache::match(cur, parts[i], true);
         if (match.isEmpty())

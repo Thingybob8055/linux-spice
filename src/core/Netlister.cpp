@@ -1,6 +1,7 @@
 #include "Netlister.h"
 
 #include "DirCache.h"
+#include "ModelLibrary.h"
 #include "SymbolLibrary.h"
 
 #include <QDir>
@@ -460,8 +461,23 @@ QStringList Netlister::sheetBody(const Schematic &sch, const Connectivity &conn,
         const bool modelIsFile = looksLikeModelFile(spiceModel);
         if (modelIsFile && !m_libLines.contains(spiceModel))
             m_libLines << spiceModel;
-        if (!modelFile.isEmpty() && !m_libLines.contains(modelFile))
-            m_libLines << modelFile;
+        if (!modelFile.isEmpty()) {
+            // LTspice looks for a symbol's ModelFile in the schematic's folder and the library;
+            // a symbol shipped with its model beside it (custom_components/1N60P.asy + .lib) is
+            // found there too. A file found nowhere is left out, as LTspice does: the schematic
+            // usually includes the model itself.
+            QString lib = modelFile;
+            if (ModelLibrary::instance().resolveFile(modelFile, schDir).isEmpty()) {
+                lib.clear();
+                if (s.def && !s.def->builtin && !s.def->filePath.isEmpty()) {
+                    const QString besideSymbol = QDir(QFileInfo(s.def->filePath).absolutePath()).filePath(QString(modelFile).replace('\\', '/'));
+                    if (QFileInfo::exists(besideSymbol))
+                        lib = besideSymbol;
+                }
+            }
+            if (!lib.isEmpty() && !m_libLines.contains(lib))
+                m_libLines << lib;
+        }
 
         const bool isSub = prefix.startsWith('X', Qt::CaseInsensitive);
         if (!spiceModel.isEmpty() && !modelIsFile)

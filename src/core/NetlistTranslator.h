@@ -99,6 +99,8 @@ private:
     void resolveDefinitions();
     QString pwlFromFile(const QString &file, double timeScale, double valueScale);
     QString pwlFromWav(const QString &file, int channel);
+    bool readWav(const QString &file, int channel, QVector<double> *samples, double *rate);
+    QString wavStreamFile(const QString &file, int channel, double *rate);
     QString nodeToken(const QString &n);
     QString elementName(const QString &n);
     bool isKnownModel(const QString &name) const;
