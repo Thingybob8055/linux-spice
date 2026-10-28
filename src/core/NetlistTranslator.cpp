@@ -547,6 +547,8 @@ TranslationResult NetlistTranslator::translate(const QStringList &ltLines, const
     out << pulled;
     for (const QString &m : m_models)
         out << translateModel(m);
+    if (m_needLocator)
+        out << QStringLiteral(".model ls_loc_sw sw(vt=0 vh=0 ron=1 roff=1)");
     out << m_directives;
     // LTspice's noise plot holds every device's contribution to the output noise.
     if (m_res.analysis == QLatin1String("noise"))
@@ -733,6 +735,9 @@ void NetlistTranslator::processLines(const QStringList &lines, int depth)
     for (QString l : lines) {
         l.replace(QChar(0xB5), 'u');
         l.replace(QChar(0x03BC), 'u');
+        // LTspice reads ".include../lib/x.sub" (no space before the path).
+        static const QRegularExpression glued(QStringLiteral("^(\\s*\\.(?:include|inc|lib))(?=[./\\\\\"])"), QRegularExpression::CaseInsensitiveOption);
+        l.replace(glued, QStringLiteral("\\1 "));
         const QString t = l.trimmed();
         if (t.isEmpty() || t == QLatin1String("*<binary>"))
             continue;
@@ -863,15 +868,8 @@ void NetlistTranslator::processLines(const QStringList &lines, int depth)
         } else if (kw == QLatin1String(".wave")) {
             m_res.waveStatements << t;
         } else if (kw == QLatin1String(".four") || kw == QLatin1String(".fourier")) {
-            // LTspice: .four <freq> [Nharmonics] [Nperiods] <data...>
-            QStringList parts = tok.mid(1);
-            QStringList outParts;
-            if (!parts.isEmpty())
-                outParts << parts.takeFirst();
-            while (!parts.isEmpty() && isNumeric(parts.first()))
-                parts.removeFirst();
-            outParts << parts;
-            m_directives << QStringLiteral(".four %1").arg(outParts.join(' '));
+            // Evaluated in post-processing (fourier::evaluate): ngspice's .four lacks LTspice's
+            // harmonic count and period arguments and can't take {param} frequencies.
             m_res.fourStatements << t;
         } else if (kw == QLatin1String(".ic") || kw == QLatin1String(".nodeset")) {
             // Move I(Lx)=val to the inductor's ic= parameter.
@@ -1254,9 +1252,9 @@ QStringList NetlistTranslator::translateElement(const QString &rawLine, bool top
             QString rebuilt = line;
             const int p1 = rebuilt.indexOf(bt[1], bt[0].size());
             rebuilt.replace(p1, bt[1].size(), inner);
-            return QStringList{sense} + translateBehavioral(rebuilt);
+            return crossingLocators(QStringList{sense} + translateBehavioral(rebuilt));
         }
-        return translateBehavioral(line);
+        return crossingLocators(translateBehavioral(line));
     }
     // A decimal comma ("4,7k") would split into "4" and "7k" and silently give a 4 ohm part;
     // LTspice rejects it as a syntax error, and so does this.
@@ -1940,6 +1938,72 @@ QStringList NetlistTranslator::translateSource(const QStringList &t)
         out << QStringLiteral("R%1_rpar %2 %3 %4").arg(name, n1, n2, rpar);
         if (!m_inSubckt) // only top-level devices' currents are saved and probed
             m_res.parallelParts[name.toLower()] << QStringLiteral("r%1_rpar").arg(name.toLower());
+    }
+    return out;
+}
+
+// LTspice cuts its timestep where a comparison in a behavioral source flips (an if() comparator
+// switches within a nanosecond); ngspice has no such event detection and steps over the crossing,
+// so a PWM comparator switched microseconds late. ngspice's voltage-controlled switch does limit
+// the step while its control approaches the threshold (SWtrunc, down to 50mV away), so each
+// comparison of circuit quantities gets a switch carrying no current whose control is the
+// difference scaled by 1e6: crossings are then located to ~50nV.
+QStringList NetlistTranslator::crossingLocators(const QStringList &lines)
+{
+    if (m_res.analysis != QLatin1String("tran"))
+        return lines;
+    QStringList out = lines;
+    static const QRegularExpression dyn(QStringLiteral("\\b(v|i)\\s*\\(|\\btime\\b"), QRegularExpression::CaseInsensitiveOption);
+    for (const QString &l : lines) {
+        if (!l.startsWith('B', Qt::CaseInsensitive))
+            continue;
+        const int eq = l.indexOf('=');
+        if (eq < 0)
+            continue;
+        const QString e = l.mid(eq + 1);
+        const QString elem = l.section(' ', 0, 0);
+        int k = 0;
+        auto stop = [](QChar c) { return c == ',' || c == '?' || c == ':' || c == '&' || c == '|' || c == '<' || c == '>' || c == '=' || c == '!'; };
+        for (int i = 0; i < e.size(); ++i) {
+            if (e[i] != '<' && e[i] != '>')
+                continue;
+            const int opEnd = (i + 1 < e.size() && e[i + 1] == '=') ? i + 2 : i + 1;
+            int a = i - 1;
+            for (int depth = 0; a >= 0; --a) {
+                if (e[a] == ')')
+                    ++depth;
+                else if (e[a] == '(' && depth-- == 0)
+                    break;
+                else if (depth == 0 && stop(e[a]))
+                    break;
+            }
+            int b = opEnd;
+            for (int depth = 0; b < e.size(); ++b) {
+                if (e[b] == '(')
+                    ++depth;
+                else if (e[b] == ')' && depth-- == 0)
+                    break;
+                else if (depth == 0 && stop(e[b]))
+                    break;
+            }
+            const QString lhs = e.mid(a + 1, i - a - 1).trimmed(), rhs = e.mid(opEnd, b - opEnd).trimmed();
+            i = opEnd - 1;
+            if (lhs.isEmpty() || rhs.isEmpty() || !(dyn.match(lhs).hasMatch() || dyn.match(rhs).hasMatch()))
+                continue;
+            // A quantity that jumps (rand(), floor(), ...) never approaches the threshold: the
+            // switch would keep cutting the step at the jump until ngspice gives up.
+            static const QRegularExpression jumps(QStringLiteral("\\b(floor|ceil|int|round|rand|random|white|sgn|sign|u|buf|inv|stp|mc|gauss|flat)\\s*\\("),
+                                                  QRegularExpression::CaseInsensitiveOption);
+            if (jumps.match(lhs).hasMatch() || jumps.match(rhs).hasMatch())
+                continue;
+            const QString ctrl = internalNode(elem, 300 + k), sw = internalNode(elem, 400 + k);
+            const QString tag = QStringLiteral("%1_loc%2").arg(elementName(elem)).arg(k);
+            out << QStringLiteral("Bls_%1 %2 0 V=1e6*((%3)-(%4))").arg(tag, ctrl, lhs, rhs);
+            out << QStringLiteral("Sls_%1 %2 0 %3 0 ls_loc_sw").arg(tag, sw, ctrl);
+            out << QStringLiteral("Rls_%1 %2 0 1").arg(tag, sw);
+            m_needLocator = true;
+            ++k;
+        }
     }
     return out;
 }
@@ -3139,8 +3203,14 @@ QString NetlistTranslator::translateAnalysis(const QString &line)
             tstep = (tstop - tstart) / 1024.0;
         // LTspice's maximum step is Tstop/1024 unless given; unlike ngspice it is not limited by the
         // time step argument (".tran 1u 100m" still steps up to 97.7us). Measured on its raw files.
-        if (tmax <= 0)
+        // Inside the saved window LTspice also keeps the step to (Tstop-Tstart)/250 (".tran 0 1.005m 1m"
+        // steps 20ns there, Tstop/1024 before); ngspice has one maximum step, so the smaller one is
+        // used throughout: slower before Tstart, but as accurate as LTspice where it is saved.
+        if (tmax <= 0) {
             tmax = tstop / 1024.0;
+            if (tstart > 0 && tstart < tstop)
+                tmax = std::min(tmax, (tstop - tstart) / 250.0);
+        }
         // Device limits only ever tighten the step.
         if (m_deviceMaxStep > 0) {
             const double effective = tmax;
@@ -3485,7 +3555,7 @@ QStringList NetlistTranslator::floatingNodeShunts(const QStringList &elements, c
     QSet<QString> done;
     int idx = 0;
     // A node reached only through capacitors ("floating") gets, in LTspice, a DC path made of a
-    // conductance of C*1e-12 S/F across each capacitor touching its group plus 1e-12 S from the
+    // conductance of C*2^-43 S/F across each capacitor touching its group plus 2^-43 S from the
     // group's last-seen node to ground, so it settles at sum(C*V)/(1F+sum(C)) (measured, also
     // the node LTspice's "Node x is floating" names). Groups are resolved outwards from DC-tied nodes so
     // that chains of capacitors work. A capacitor with ic= already fixes its far side during the
@@ -3521,10 +3591,13 @@ QStringList NetlistTranslator::floatingNodeShunts(const QStringList &elements, c
                     queue << m;
         }
     }
+    // The leak is 2^-43 S (fitted from LTspice's AC response at 1uHz, contrib/gr_del); DC levels
+    // depend only on the ratio of the two conductances.
+    constexpr double kFloatR = 8796093022208.0; // 2^43 ohm
     // A dangling group carries no current, so any path will do; 1T keeps the matrix well scaled.
     auto across = [&](const CapEdge &e, bool flagged) {
         out << QStringLiteral("R__dcpath%1 %2 %3 %4").arg(++idx).arg(e.a, e.b)
-                   .arg(flagged ? QString::number(1e12 / std::max(e.c, 1e-18), 'g', 6) : QStringLiteral("1T"));
+                   .arg(flagged ? QString::number(kFloatR / std::max(e.c, 1e-18), 'g', 10) : QStringLiteral("1T"));
     };
     for (bool changed = true; changed;) {
         changed = false;
@@ -3546,7 +3619,7 @@ QStringList NetlistTranslator::floatingNodeShunts(const QStringList &elements, c
             for (int i : it.value())
                 across(capEdges[i], !last.isEmpty());
             if (!last.isEmpty())
-                out << QStringLiteral("R__dcpath%1 %2 0 1e12").arg(++idx).arg(last);
+                out << QStringLiteral("R__dcpath%1 %2 0 %3").arg(++idx).arg(last).arg(kFloatR, 0, 'g', 13);
             join(group, gnd);
             changed = true;
         }

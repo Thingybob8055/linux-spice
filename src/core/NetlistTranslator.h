@@ -82,6 +82,7 @@ private:
     QStringList translatePassive(const QStringList &t);
     QStringList translateSource(const QStringList &t);
     QStringList translateBehavioral(const QString &line);
+    QStringList crossingLocators(const QStringList &lines);
     QStringList translateControlled(const QStringList &t, const QString &line);
     QStringList translateSemiconductor(const QStringList &t);
     QStringList translateDigital(const QStringList &t);
@@ -135,6 +136,7 @@ private:
     bool m_thevInduc = false;
     int m_includeDepth = 0;
     bool m_inMachine = false;
+    bool m_needLocator = false; // crossingLocators() emitted switches using ls_loc_sw
     bool m_inSubckt = false; // translating a subcircuit body (models there are macromodel internals)
     bool m_startup = false;
 };

@@ -68,7 +68,9 @@ private:
         QPointer<QProcess> proc;
         double percent = 0;
         bool done = false;
-        bool retried = false;
+        int retries = 0;         // convergence retries done so far
+        bool ringingChecked = false;
+        QString originalNetlist; // the netlist before any retry options
         int exitCode = -1;
         QString log;
         QString lineBuffer;

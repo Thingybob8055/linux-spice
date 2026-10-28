@@ -5,6 +5,7 @@
 
 #include "core/AppSettings.h"
 #include "core/Expression.h"
+#include "core/Fourier.h"
 #include "core/Fra.h"
 #include "core/Measure.h"
 #include "core/NetlistTranslator.h"
@@ -380,14 +381,38 @@ static void testMacromodelParts()
         CHECK(sw.netlist.contains(QRegularExpression("\\.model sw sw\\(\\s*vt=2n vh=1e-9\\)", QRegularExpression::CaseInsensitiveOption)));
         CHECK(sw.netlist.contains(QRegularExpression("\\.model sh sw\\(vt=1 vh=0.5\\)", QRegularExpression::CaseInsensitiveOption)));
     }
-    // Floating nodes: C*1e-12 S across each capacitor plus 1e-12 S to ground from the group's
+    // Floating nodes: C*2^-43 S across each capacitor plus 2^-43 S to ground from the group's
     // last node, so x settles at sum(C*V)/(1F+sum(C)); a dangling node just follows its far side.
     {
         NetlistTranslator t11;
         const TranslationResult fl = t11.translate({"* fl", "V1 a 0 5", "R1 a 0 1k", "C3 x a 1u", "R9 x y 1k", "C5 y 0 2u",
                                                     "C6 z a 1u", ".op", ".end"}, o);
-        CHECK(fl.netlist.contains(" x a 1e+18") && fl.netlist.contains(" y 0 5e+17") && fl.netlist.contains(" y 0 1e12"));
+        CHECK(fl.netlist.contains(" x a 8.796093022e+18") && fl.netlist.contains(" y 0 4.398046511e+18") && fl.netlist.contains(" y 0 8796093022208"));
         CHECK(fl.netlist.contains(" z a 1T") && !fl.netlist.contains(" z 0 "));
+    }
+    // A comparison in a behavioral source gets a hidden switch that locates its crossing.
+    {
+        NetlistTranslator t14;
+        const TranslationResult lc = t14.translate({"* loc", "V1 a 0 SIN(0 1 1k)", "B1 b 0 V=if(V(a)>=0.5,10,0)", "R1 b 0 1k",
+                                                    ".tran 0 10m 9m", ".end"}, o);
+        CHECK(lc.netlist.contains(QRegularExpression("Bls_B1_loc0 \\S+ 0 V=1e6\\*\\(\\(V\\(a\\)\\)-\\(0.5\\)\\)")));
+        CHECK(lc.netlist.contains(".model ls_loc_sw sw("));
+        // Inside the saved window LTspice's step is at most (Tstop-Tstart)/250.
+        CHECK(lc.netlist.contains(".tran 9.765625e-07 0.01 0.009 4e-06"));
+    }
+    // ".include../lib/x.sub" (no space) is read like LTspice does.
+    {
+        QTemporaryDir dir;
+        QDir(dir.path()).mkdir("lib");
+        QFile f(dir.path() + "/lib/x.sub");
+        f.open(QIODevice::WriteOnly);
+        f.write(".subckt xx a b\nR1 a b 1k\n.ends xx\n");
+        f.close();
+        NetlistTranslator t15;
+        NetlistTranslator::Options oi = o;
+        oi.baseDir = dir.path();
+        const TranslationResult inc = t15.translate({"* inc", "V1 a 0 1", "X1 a 0 xx", ".include./lib/x.sub", ".op", ".end"}, oi);
+        CHECK(inc.errors.isEmpty() && inc.netlist.contains(".subckt xx", Qt::CaseInsensitive));
     }
     // A zener's low-level breakdown (Ibvl/Nbvl) becomes a parallel diode.
     {
@@ -507,6 +532,30 @@ static int corpus(const QString &dir, bool translate)
     return 0;
 }
 
+// .four: LTspice's harmonic table from the transient data.
+static void testFourier()
+{
+    Dataset ds;
+    ds.kind = Dataset::Kind::Transient;
+    ds.vars = {{"time", "time"}, {"V(b)", "voltage"}};
+    Dataset::Run run;
+    run.re.resize(2);
+    for (int i = 0; i <= 5000; ++i) {
+        const double t = i * 1e-6, x = std::sin(2 * M_PI * 1e3 * t);
+        run.re[0] << t;
+        run.re[1] << x + 0.1 * x * x * x;
+    }
+    ds.runs << run;
+    ds.rebuildIndex();
+    const QString log = fourier::evaluate(ds, 0, {".four {f} 3 V(b)"}, {{"f", 1e3}});
+    // x + 0.1x^3 = 1.075 sin(wt) - 0.025 sin(3wt): LTspice prints 1.075e+00, 90.00 and 2.504e-02, -89.99.
+    CHECK(log.contains("    1   \t 1.000e+03\t 1.075e+00\t 1.000e+00\t   90.00"));
+    CHECK(log.contains("    3   \t 3.000e+03\t 2.50"));
+    CHECK(log.contains("Partial Harmonic Distortion: 2.32") || log.contains("Partial Harmonic Distortion: 2.33"));
+    if (g_failures)
+        std::fprintf(stderr, "%s\n", qPrintable(log));
+}
+
 int main(int argc, char **argv)
 {
     Q_INIT_RESOURCE(resources);
@@ -599,6 +648,7 @@ int main(int argc, char **argv)
     testMacromodelParts();
     testStep();
     testMeasure();
+    testFourier();
     if (g_failures) {
         std::fprintf(stderr, "%d failure(s)\n", g_failures);
         return 1;

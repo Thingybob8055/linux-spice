@@ -2,6 +2,7 @@
 
 #include "core/AppSettings.h"
 #include "core/Expression.h"
+#include "core/Fourier.h"
 #include "core/Measure.h"
 #include "core/StepSweep.h"
 #include "core/TextIO.h"
@@ -20,6 +21,7 @@
 #include <QtEndian>
 
 #include <csignal>
+#include <algorithm>
 #include <cmath>
 
 SimController::SimController(QObject *parent)
@@ -246,33 +248,111 @@ void SimController::onOutput(Job &job)
         emit logText(logChunk);
 }
 
+// Longest run of consecutive time steps in which a node voltage alternates up and down by more
+// than max(20mV, 2% of its range): trapezoidal ringing left after an edge was crossed in one step
+// (the NE555 example's output sat 0.8V above its supply, zigzagging 1.8V every step). LTspice's
+// own results never show more than 14 such steps; that one went on for 45.
+static int ringingRun(const Dataset &ds)
+{
+    int best = 0;
+    if (ds.kind != Dataset::Kind::Transient || ds.runs.isEmpty())
+        return 0;
+    for (int v = 1; v < ds.vars.size(); ++v) {
+        if (ds.vars[v].type != QLatin1String("voltage") || ds.vars[v].name.contains(QLatin1String("ls_"), Qt::CaseInsensitive))
+            continue;
+        const QVector<double> &y = ds.runs[0].re[v];
+        if (y.size() < 10)
+            continue;
+        const auto [lo, hi] = std::minmax_element(y.begin(), y.end());
+        const double th = std::max(0.02, 0.02 * (*hi - *lo));
+        int run = 0;
+        for (int i = 2; i < y.size(); ++i) {
+            const double d1 = y[i] - y[i - 1], d0 = y[i - 1] - y[i - 2];
+            run = (d1 * d0 < 0 && std::abs(d1) > th && std::abs(d0) > th) ? run + 1 : 0;
+            best = std::max(best, run);
+        }
+    }
+    return best;
+}
+
 void SimController::onFinished(Job &job, int code)
 {
     if (job.proc) {
         onOutput(job);
         job.proc->deleteLater();
     }
-    // Convergence trouble: retry once with stronger convergence aids
-    // (shunt resistance on every node, more gmin/source steps, more iterations).
+    // Convergence trouble: retry with convergence aids. First looser current tolerances
+    // (ngspice checks branch currents to 1pA; a hard-on switch carrying nA at hundreds of volts
+    // never meets that from rounding noise alone, where LTspice runs), then a shunt on every node
+    // with more gmin/source steps and iterations.
+    // The comparison locators (hidden "ls_loc" switches, see NetlistTranslator::crossingLocators)
+    // are dropped before the last resort, in case they are what stalls the run.
+    static const QStringList retryOptions = {
+        QStringLiteral(".options abstol=1e-9 itl4=100"),
+        QStringLiteral(".options abstol=1e-6 itl4=100"),
+        QStringLiteral("-loc .options abstol=1e-9 itl4=100"),
+        QStringLiteral("-loc .options rshunt=1e12 gminsteps=200 srcsteps=200 itl1=1000 itl2=500 itl4=100 method=gear"),
+    };
     const bool failed = (job.exitCode < 0 ? code : job.exitCode) != 0 || !QFileInfo::exists(job.rawPath);
-    const bool convergence = job.log.contains(QLatin1String("gmin stepping failed")) || job.log.contains(QLatin1String("singular matrix"))
-        || job.log.contains(QLatin1String("timestep too small")) || job.log.contains(QLatin1String("source stepping failed"));
-    if (failed && convergence && !job.retried && !m_aborted) {
-        job.retried = true;
+    const bool convergence = job.log.contains(QLatin1String("gmin stepping failed"), Qt::CaseInsensitive)
+        || job.log.contains(QLatin1String("singular matrix"), Qt::CaseInsensitive)
+        || job.log.contains(QLatin1String("timestep too small"), Qt::CaseInsensitive)
+        || job.log.contains(QLatin1String("source stepping failed"), Qt::CaseInsensitive);
+    if (failed && convergence && job.retries < retryOptions.size() && !m_aborted) {
         QFile f(job.netlistPath);
-        if (f.open(QIODevice::ReadOnly)) {
-            QString text = QString::fromUtf8(f.readAll());
+        if (job.originalNetlist.isEmpty() && f.open(QIODevice::ReadOnly)) {
+            job.originalNetlist = QString::fromUtf8(f.readAll());
             f.close();
+        }
+        if (!job.originalNetlist.isEmpty()) {
+            QString extra = retryOptions[job.retries++];
+            QString text = job.originalNetlist;
+            QString note = extra;
+            if (extra.startsWith(QLatin1String("-loc "))) {
+                extra = extra.mid(5);
+                static const QRegularExpression loc(QStringLiteral("^([BSR]ls_\\S+_loc\\d+ )"), QRegularExpression::MultilineOption);
+                text.replace(loc, QStringLiteral("*\\1"));
+                note = extra + QStringLiteral(" and no comparison locators");
+            }
             const int endIdx = text.lastIndexOf(QLatin1String("\n.end"));
-            const QString extra = QStringLiteral("\n.options rshunt=1e12 gminsteps=200 srcsteps=200 itl1=1000 itl2=500 itl4=100 method=gear");
             if (endIdx >= 0)
-                text.insert(endIdx, extra);
+                text.insert(endIdx, QLatin1Char('\n') + extra);
             else
-                text += extra + QStringLiteral("\n.end\n");
+                text += QLatin1Char('\n') + extra + QStringLiteral("\n.end\n");
             if (f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
                 f.write(text.toUtf8());
                 f.close();
-                job.log += QStringLiteral("\n*** Convergence failed; retrying with rshunt=1e12 and extended gmin/source stepping ***\n");
+                job.log += QStringLiteral("\n*** Convergence failed; retrying with %1 ***\n").arg(note);
+                job.proc = nullptr;
+                job.exitCode = -1;
+                job.percent = 0;
+                launchNext();
+                return;
+            }
+        }
+    }
+    // Sustained ringing: run again with a tighter time-step tolerance. LTspice resolves such edges
+    // in nanosecond steps; ngspice at LTspice's trtol=2 can cross them in one step, and trtol=1
+    // everywhere would detune LC oscillators that match LTspice at 2.
+    if (!failed && !job.ringingChecked && !m_aborted) {
+        job.ringingChecked = true;
+        QFile f(job.netlistPath);
+        QString text;
+        if (f.open(QIODevice::ReadOnly)) {
+            text = QString::fromUtf8(f.readAll());
+            f.close();
+        }
+        if (text.contains(QLatin1String("\n.options trtol=2\n")) && QFileInfo(job.rawPath).size() < 300'000'000) {
+            QString err;
+            const QList<DatasetPtr> plots = rawfile::read(job.rawPath, &err);
+            const int ring = plots.isEmpty() ? 0 : ringingRun(*plots.first());
+            if (ring >= 25 && f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+                text.replace(QLatin1String("\n.options trtol=2\n"), QLatin1String("\n.options trtol=1\n"));
+                f.write(text.toUtf8());
+                f.close();
+                if (!job.originalNetlist.isEmpty())
+                    job.originalNetlist.replace(QLatin1String("\n.options trtol=2\n"), QLatin1String("\n.options trtol=1\n"));
+                job.log += QStringLiteral("\n*** Integration ringing after a fast edge (%1 steps); rerunning with .options trtol=1 ***\n").arg(ring);
                 job.proc = nullptr;
                 job.exitCode = -1;
                 job.percent = 0;
@@ -834,6 +914,29 @@ void SimController::assemble()
             if (!measLog.isEmpty()) {
                 log += QStringLiteral("\n") + measLog + QStringLiteral("\n");
                 result.measLines = measLog.split('\n');
+            }
+        }
+        // .four: harmonic analysis of the transient data, per step.
+        if (!tr0.fourStatements.isEmpty() && merged->kind == Dataset::Kind::Transient) {
+            for (int r = 0; r < merged->runs.size(); ++r) {
+                const TranslationResult &tr = m_translations.value(r, tr0);
+                QHash<QString, double> params;
+                ParamContext pc;
+                for (int pass = 0; pass < 4; ++pass)
+                    for (auto it = tr.params.constBegin(); it != tr.params.constEnd(); ++it) {
+                        bool ok = false;
+                        const double v = Expression(it.value()).evaluateScalar(pc, &ok);
+                        if (ok) {
+                            params.insert(it.key(), v);
+                            pc.vars.insert(it.key(), Value::scalar(v));
+                        }
+                    }
+                const QString four = fourier::evaluate(*merged, r, tr0.fourStatements, params);
+                if (four.isEmpty())
+                    continue;
+                if (merged->runs.size() > 1)
+                    log += QStringLiteral("\n--- .four, step %1: %2 ---").arg(r + 1).arg(m_stepLabels.value(r));
+                log += four;
             }
         }
         // .fra: extract the frequency response from the transient data.

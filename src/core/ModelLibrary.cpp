@@ -223,6 +223,8 @@ static QString findCaseInsensitive(const QString &dir, const QString &rel)
     QString cur = dir;
     const QStringList parts = QString(rel).replace('\\', '/').split('/', Qt::SkipEmptyParts);
     for (int i = 0; i < parts.size(); ++i) {
+        if (parts[i] == QLatin1String(".")) // "./lib/x.sub"
+            continue;
         const bool last = i == parts.size() - 1;
         QString match = DirCache::match(cur, parts[i], !last);
         if (match.isEmpty() && parts[i] == QLatin1String(".."))
