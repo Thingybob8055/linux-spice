@@ -62,6 +62,19 @@ std::optional<double> parseSpiceNumber(const QString &input)
         default: break;
         }
     }
+    // The unit letter may stand for the decimal point, as LTspice reads it: "4k7" = 4.7k,
+    // "7m999" = 7.999m, "2meg2" = 2.2meg. Only after a whole-number mantissa.
+    if (mult != 1.0 && !text.left(i).contains('.') && !text.left(i).contains('e', Qt::CaseInsensitive)) {
+        const int unitLen = rest.startsWith("meg") || rest.startsWith("mil") ? 3 : 1;
+        int k = unitLen;
+        while (k < rest.size() && rest[k].isDigit())
+            ++k;
+        if (k > unitLen) {
+            const QString frac = rest.mid(unitLen, k - unitLen);
+            const double f = (QStringLiteral("0.") + frac).toDouble();
+            value = value < 0 || text.startsWith('-') ? value - f : value + f;
+        }
+    }
     return value * mult;
 }
 

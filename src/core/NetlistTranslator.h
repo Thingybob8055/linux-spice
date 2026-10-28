@@ -3,6 +3,7 @@
 #include "Fra.h"
 
 #include <QHash>
+#include <QRegularExpression>
 #include <QSet>
 #include <QString>
 #include <QStringList>
@@ -73,6 +74,7 @@ private:
     };
 
     void processLines(const QStringList &lines, int depth);
+    QString akoType(const QRegularExpressionMatch &m) const;
     QStringList subcktPorts(const QString &name) const;
     void addLibrary(const QString &file, const QString &section);
     QStringList translateElement(const QString &line, bool topLevel);
@@ -86,7 +88,7 @@ private:
     QStringList translateMutual(const QStringList &t);
     // 1T resistors to ground for top-level nodes with no DC path to ground (e.g. joined only by capacitors),
     // which LTspice solves but which make the ngspice operating-point matrix singular.
-    static QStringList floatingNodeShunts(const QStringList &elements);
+    static QStringList floatingNodeShunts(const QStringList &elements, const QStringList &tiedNodes = {});
     QStringList translateSwitch(const QStringList &t);
     QStringList translateIdealDiode(const QStringList &t, const QString &modelLine);
     QStringList translateIgbt(const QStringList &t, const QString &modelLine, bool pChannel);

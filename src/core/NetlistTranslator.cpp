@@ -289,7 +289,7 @@ QString NetlistTranslator::rewriteExpression(const QString &exprIn)
     QString expr = exprIn;
     expr.replace(QChar(0xB5), 'u');
     // Function rewrites, innermost first by repeated scanning.
-    static const QRegularExpression fnRe(QStringLiteral("\\b(if|limit|table|buf|inv|mc|gauss|flat|u|rand|random|white)\\s*\\("),
+    static const QRegularExpression fnRe(QStringLiteral("\\b(if|limit|table|buf|inv|mc|gauss|flat|u|rand|random|white|pwr|pwrs)\\s*\\("),
                                          QRegularExpression::CaseInsensitiveOption);
     for (int guard = 0; guard < 200; ++guard) {
         // Find the last match so nested calls are rewritten inside-out.
@@ -349,13 +349,18 @@ QString NetlistTranslator::rewriteExpression(const QString &exprIn)
                 rep = QStringLiteral("(%1+(%2-%1)*%3%4)").arg(h(n), h(n + QStringLiteral("+1")), w, fn == QLatin1String("white") ? QStringLiteral("-0.5") : QString());
             }
         }
+        // LTspice's pwr(x,y) = |x|^y and pwrs(x,y) = sign(x)*|x|^y; ngspice's versions give 0 for x < 0.
+        else if (fn == QLatin1String("pwr") && a.size() == 2)
+            rep = QStringLiteral("pow(abs(%1),(%2))").arg(a[0], a[1]);
+        else if (fn == QLatin1String("pwrs") && a.size() == 2)
+            rep = QStringLiteral("(sgn(%1)*pow(abs(%1),(%2)))").arg(a[0], a[1]);
         else if (fn == QLatin1String("u") && a.size() == 1)
             rep = QStringLiteral("((%1) > 0 ? 1 : 0)").arg(a[0]); // unit step; not available in ngspice .param expressions
         else
             rep = QStringLiteral("%1__(%2)").arg(fn, a.join(',')); // leave as-is (marked to avoid loops)
         expr.replace(last.capturedStart(), close - last.capturedStart() + 1, rep);
     }
-    expr.replace(QRegularExpression(QStringLiteral("\\b(if|limit|table|buf|inv|mc|gauss|flat|u|rand|random|white)__\\(")), QStringLiteral("\\1("));
+    expr.replace(QRegularExpression(QStringLiteral("\\b(if|limit|table|buf|inv|mc|gauss|flat|u|rand|random|white|pwr|pwrs)__\\(")), QStringLiteral("\\1("));
     return expr;
 }
 
@@ -470,41 +475,68 @@ TranslationResult NetlistTranslator::translate(const QStringList &ltLines, const
     QStringList elements;
     for (const QString &l : m_topElements)
         elements << translateElement(l, true);
+    g_params = &m_res.params; // capacitor values in floatingNodeShunts
     elements << floatingNodeShunts(elements);
 
+    // Nodes inside a subcircuit can float too (a vendor model's unused switch control, say):
+    // LTspice tolerates them, ngspice's matrix goes singular. The ports count as connected.
+    auto subcktShunts = [](const QString &header, const QStringList &body) {
+        QStringList ports;
+        const QStringList ht = normalizeEquals(header).split(QRegularExpression(QStringLiteral("\\s+")), Qt::SkipEmptyParts).mid(2);
+        for (const QString &p : ht) {
+            if (p.contains('=') || p.compare(QLatin1String("params:"), Qt::CaseInsensitive) == 0)
+                break;
+            ports << p;
+        }
+        return floatingNodeShunts(body, ports);
+    };
     QStringList subText;
     m_inSubckt = true;
     for (const Subckt &s : m_subckts) {
         subText << normalizeEquals(s.header);
+        QStringList body;
         for (const QString &l : s.body) {
             const QString low = l.trimmed().toLower();
             if (low.startsWith(QLatin1String(".model")))
-                subText << translateModel(l);
+                body << translateModel(l);
             else if (low.startsWith(QLatin1String(".param")))
-                subText << rewriteExpression(normalizeEquals(normalizeParamLine(l)));
+                body << rewriteExpression(normalizeEquals(normalizeParamLine(l)));
             else if (low.startsWith('.'))
-                subText << normalizeEquals(l);
+                body << normalizeEquals(l);
             else
-                subText << translateElement(l, false);
+                body << translateElement(l, false);
         }
+        subText << body << subcktShunts(s.header, body);
         subText << QStringLiteral(".ends %1").arg(s.name);
     }
     m_inSubckt = false;
     QStringList pulled;
+    QString pulledHeader;
+    QStringList pulledBody;
     for (const QString &l : m_pulledDefs) {
         const QString low = l.trimmed().toLower();
-        if (low.startsWith(QLatin1String(".subckt")))
+        if (low.startsWith(QLatin1String(".subckt"))) {
             m_inSubckt = true;
-        else if (low.startsWith(QLatin1String(".ends")))
+            pulledHeader = l;
+            pulledBody.clear();
+        } else if (low.startsWith(QLatin1String(".ends"))) {
+            if (!pulledHeader.isEmpty())
+                pulled << subcktShunts(pulledHeader, pulledBody);
+            pulledHeader.clear();
             m_inSubckt = false;
+        }
+        QStringList lines;
         if (low.startsWith(QLatin1String(".model")))
-            pulled << translateModel(l);
+            lines << translateModel(l);
         else if (low.startsWith(QLatin1String(".param")))
-            pulled << rewriteExpression(normalizeEquals(normalizeParamLine(l)));
+            lines << rewriteExpression(normalizeEquals(normalizeParamLine(l)));
         else if (low.startsWith(QLatin1String(".subckt")) || low.startsWith(QLatin1String(".ends")) || low.startsWith('.'))
-            pulled << normalizeEquals(rewriteExpression(l));
+            lines << normalizeEquals(rewriteExpression(l));
         else
-            pulled << translateElement(l, false);
+            lines << translateElement(l, false);
+        if (m_inSubckt && !low.startsWith(QLatin1String(".subckt")))
+            pulledBody << lines;
+        pulled << lines;
     }
 
     out << QStringLiteral(".param pi=3.141592653589793");
@@ -686,6 +718,14 @@ TranslationResult NetlistTranslator::translate(const QStringList &ltLines, const
     return m_res;
 }
 
+// The type a ".model" line declares; an AKO model without one has its base model's type.
+QString NetlistTranslator::akoType(const QRegularExpressionMatch &m) const
+{
+    if (!m.captured(3).isEmpty())
+        return m.captured(3).toUpper();
+    return m_modelTypes.value(m.captured(2).toLower(), QStringLiteral("AKO"));
+}
+
 void NetlistTranslator::processLines(const QStringList &lines, int depth)
 {
     Subckt *open = nullptr;
@@ -718,11 +758,11 @@ void NetlistTranslator::processLines(const QStringList &lines, int depth)
             }
             open->body << t;
             if (low.startsWith(QLatin1String(".model"))) {
-                static const QRegularExpression mre(QStringLiteral("^\\.model\\s+(\\S+)\\s+(?:ako:\\s*\\S+\\s+)?([A-Za-z]+)"),
+                static const QRegularExpression mre(QStringLiteral("^\\.model\\s+(\\S+)\\s+(?:ako:\\s*([^\\s(]+)\\s*)?([A-Za-z]*)"),
                                                     QRegularExpression::CaseInsensitiveOption);
                 const auto m = mre.match(t);
                 if (m.hasMatch())
-                    m_modelTypes.insert(m.captured(1).toLower(), m.captured(2).toUpper());
+                    m_modelTypes.insert(m.captured(1).toLower(), akoType(m));
             }
             continue;
         }
@@ -754,12 +794,12 @@ void NetlistTranslator::processLines(const QStringList &lines, int depth)
             m_definedSubckts.insert(s.name.toLower());
         } else if (kw == QLatin1String(".model")) {
             m_models << t;
-            static const QRegularExpression mre(QStringLiteral("^\\.model\\s+(\\S+)\\s+(?:ako:\\s*\\S+\\s+)?([A-Za-z]+)"),
+            static const QRegularExpression mre(QStringLiteral("^\\.model\\s+(\\S+)\\s+(?:ako:\\s*([^\\s(]+)\\s*)?([A-Za-z]*)"),
                                                 QRegularExpression::CaseInsensitiveOption);
             const auto m = mre.match(t);
             if (m.hasMatch()) {
                 m_definedModels.insert(m.captured(1).toLower());
-                m_modelTypes.insert(m.captured(1).toLower(), m.captured(2).toUpper());
+                m_modelTypes.insert(m.captured(1).toLower(), akoType(m));
             }
         } else if (kw == QLatin1String(".param") || kw == QLatin1String(".params")) {
             QString p = normalizeParamLine(t);
@@ -915,7 +955,8 @@ void NetlistTranslator::collectNeeds(const QStringList &elementLines, QSet<QStri
         const QString line = normalizeEquals(raw.trimmed());
         if (line.startsWith('.') || line.isEmpty())
             continue;
-        const QStringList t = tokenize(line);
+        QStringList t = tokenize(line);
+        t.removeAll(QStringLiteral("\"\"")); // an empty SpiceLine attribute, as translateElement drops it
         if (t.isEmpty())
             continue;
         const QChar k = t[0][0].toUpper();
@@ -1216,6 +1257,17 @@ QStringList NetlistTranslator::translateElement(const QString &rawLine, bool top
             return QStringList{sense} + translateBehavioral(rebuilt);
         }
         return translateBehavioral(line);
+    }
+    // A decimal comma ("4,7k") would split into "4" and "7k" and silently give a 4 ohm part;
+    // LTspice rejects it as a syntax error, and so does this.
+    if (QStringLiteral("RCL").contains(k)) {
+        const QStringList raw = line.split(QRegularExpression(QStringLiteral("\\s+")), Qt::SkipEmptyParts);
+        static const QRegularExpression decimalComma(QStringLiteral("^[0-9]+,[0-9]+[A-Za-z\u00b5]*$"));
+        if (raw.size() > 3 && decimalComma.match(raw[3]).hasMatch()) {
+            m_res.errors << QStringLiteral("%1: value \"%2\" uses a decimal comma; write %3 (LTspice rejects it too)")
+                                .arg(raw[0], raw[3], QString(raw[3]).replace(',', '.'));
+            return {};
+        }
     }
     line = normalizeEquals(line);
     QStringList t = tokenize(line);
@@ -1632,6 +1684,7 @@ QStringList NetlistTranslator::translateSource(const QStringList &t)
     const QString n1 = nodeToken(t[1]), n2 = nodeToken(t[2]);
     QString dc, acMag, acPhase, func, rser, cpar, rpar;
     QString wavStream; // long .wav input streamed from this file (see wavStreamFile)
+    QString pulseGuard; // breakpoint companion for a periodic PULSE (see below)
     double wavRate = 0;
     bool load = false;
     QStringList rest = t.mid(3);
@@ -1689,6 +1742,23 @@ QStringList NetlistTranslator::translateSource(const QStringList &t)
                     if (isNumeric(args[ai]) && numberOr(args[ai], 1) == 0)
                         args[ai] = ai == 5 ? QStringLiteral("1e-12") : QString::number(edge, 'g', 12);
                 func = QStringLiteral("PULSE(%1)").arg(args.join(' '));
+                // ngspice (vsrcacct.c) finds the position in the period with floor(t/PER); at a
+                // period start that can round down to PER-eps, the next edge is then never
+                // scheduled and a following large step can skip the whole pulse. A silent
+                // companion with corners on the same instants, but its period starting at the
+                // fall, keeps a breakpoint inside every pulse so the source re-schedules itself.
+                if (args.size() >= 7) {
+                    const double td = numberOr(args[2], qQNaN()), tr = numberOr(args[3], qQNaN());
+                    const double tf = numberOr(args[4], qQNaN()), pw = numberOr(args[5], qQNaN());
+                    const double per = numberOr(args[6], qQNaN());
+                    const double rest = per - tr - pw - tf;
+                    if (std::isfinite(td + tr + tf + pw + per) && per > 0 && rest > 0) {
+                        pulseGuard = QStringLiteral("PULSE(0 0 %1 %2 %3 %4 %5%6)")
+                                         .arg(td + tr + pw, 0, 'g', 15).arg(tf, 0, 'g', 15).arg(rest, 0, 'g', 15)
+                                         .arg(tr, 0, 'g', 15).arg(per, 0, 'g', 15)
+                                         .arg(args.size() > 7 ? ' ' + args[7] : QString());
+                    }
+                }
             } else {
                 func = QStringLiteral("%1(%2)").arg(fn.toUpper(), args.join(' '));
             }
@@ -1716,6 +1786,11 @@ QStringList NetlistTranslator::translateSource(const QStringList &t)
                 else if (lr == QLatin1String("repeat")) continue;
                 else if (lr == QLatin1String("for") && j + 1 < rest.size()) { repeat = int(numberOr(rest[++j], 1)); }
                 else if (lr == QLatin1String("forever")) repeatForever = true;
+                else if (lr.startsWith(QLatin1String("forever(")) && r.endsWith(')')) {
+                    // tokenize() attaches "(...)" to the word before it: "FOREVER (0 1 ...)"
+                    repeatForever = true;
+                    points << r.mid(8, r.size() - 9);
+                }
                 else if (lr == QLatin1String("endrepeat")) continue;
                 else if (r.startsWith('(')) points << r.mid(1, r.size() - 2);
                 else if (lr.startsWith(QLatin1String("td="))) td = r.mid(3);
@@ -1821,6 +1896,8 @@ QStringList NetlistTranslator::translateSource(const QStringList &t)
             spec = QStringLiteral(" DC 0");
         out << QStringLiteral("%1 %2 %3%4").arg(name, a, n2, spec);
     }
+    if (!pulseGuard.isEmpty())
+        out << QStringLiteral("Vls_%1_bp %2 0 %3").arg(name.toLower(), internalNode(t[0], 72), pulseGuard);
     if (!wavStream.isEmpty()) {
         // The source becomes a 0V sense source (keeping its name and current) in series with an
         // XSPICE filesource; the time step is held to one sample period so every sample is seen.
@@ -1887,6 +1964,49 @@ QStringList NetlistTranslator::translateBehavioral(const QString &lineIn)
     QString expr = rewriteCurrents(rewriteExpression(rest.trimmed()));
     if (units::isBraced(expr))
         expr = expr.mid(1, expr.size() - 2);
+    // LTspice's delay(x, T[, Tmax]): x delayed by the constant time T. ngspice has no such function;
+    // each call becomes x on a buffer node driving a matched ideal transmission line of delay T,
+    // whose far end replaces the call (exact in transient, e^(-sT) in AC, as LTspice's).
+    QStringList delayLines;
+    {
+        static const QRegularExpression delayRe(QStringLiteral("\\bdelay\\s*\\("), QRegularExpression::CaseInsensitiveOption);
+        int idx = 0;
+        for (auto m = delayRe.match(expr); m.hasMatch(); m = delayRe.match(expr)) {
+            const int open = m.capturedEnd() - 1;
+            const int close = matchParen(expr, open);
+            if (close < 0)
+                break;
+            QStringList args;
+            int depth = 0, start = open + 1;
+            for (int i = open + 1; i < close; ++i) {
+                if (expr[i] == '(')
+                    ++depth;
+                else if (expr[i] == ')')
+                    --depth;
+                else if (expr[i] == ',' && depth == 0) {
+                    args << expr.mid(start, i - start).trimmed();
+                    start = i + 1;
+                }
+            }
+            args << expr.mid(start, close - start).trimmed();
+            if (args.size() < 2) {
+                m_res.errors << QStringLiteral("%1: delay() needs a signal and a delay time").arg(head[0]);
+                break;
+            }
+            ++idx;
+            const QString in = internalNode(head[0], 300 + 2 * idx), outN = internalNode(head[0], 301 + 2 * idx);
+            delayLines << QStringLiteral("B%1_din%2 %3 0 V=%4").arg(name).arg(idx).arg(in, args[0]);
+            delayLines << QStringLiteral("T%1_del%2 %3 0 %4 0 Z0=1 Td={%5}").arg(name).arg(idx).arg(in, outN, args[1]);
+            delayLines << QStringLiteral("R%1_del%2 %3 0 1").arg(name).arg(idx).arg(outN);
+            expr.replace(m.capturedStart(), close + 1 - m.capturedStart(), QStringLiteral("V(%1)").arg(outN));
+        }
+    }
+    if (!delayLines.isEmpty()) {
+        QString rebuilt = QStringLiteral("%1 %2 %3 %4=%5").arg(head[0], head[1], head[2], QString(kind), expr);
+        if (!params.isEmpty())
+            rebuilt += ' ' + params;
+        return delayLines + translateBehavioral(rebuilt);
+    }
     if (params.contains(QLatin1String("laplace"), Qt::CaseInsensitive)) {
         // The B expression is the input of the transfer function.
         const QString inNode = internalNode(head[0], 51);
@@ -2799,26 +2919,29 @@ QString NetlistTranslator::translateModel(const QString &lineIn)
     QString line = normalizeEquals(lineIn);
     line.replace(QChar(0xB5), 'u');
     // AKO: inherit from another model.
-    static const QRegularExpression ako(QStringLiteral("^\\.model\\s+(\\S+)\\s+ako:\\s*(\\S+)\\s+([A-Za-z]+)\\s*\\(?(.*?)\\)?\\s*$"),
+    // The type may be omitted (".model mypnp AKO: 2N3906 (bf=150)"): it is the base model's.
+    static const QRegularExpression ako(QStringLiteral("^\\.model\\s+(\\S+)\\s+ako:\\s*([^\\s(]+)\\s*(?:([A-Za-z]+)(?=[\\s(]|$))?\\s*\\(?(.*?)\\)?\\s*$"),
                                         QRegularExpression::CaseInsensitiveOption);
     const auto am = ako.match(line);
     if (am.hasMatch()) {
-        QString baseParams;
+        QString baseParams, baseType;
         const QString base = am.captured(2).toLower();
-        auto findBase = [&](const QStringList &lines) -> QString {
+        auto findBase = [&](const QStringList &lines) -> bool {
             for (const QString &l : lines) {
-                const QStringList tt = l.split(QRegularExpression(QStringLiteral("\\s+")), Qt::SkipEmptyParts);
+                const QStringList tt = normalizeEquals(l).split(QRegularExpression(QStringLiteral("[\\s(]+")), Qt::SkipEmptyParts);
                 if (tt.size() > 2 && tt[0].compare(QLatin1String(".model"), Qt::CaseInsensitive) == 0 && tt[1].toLower() == base) {
                     const int open = l.indexOf('(');
-                    return open >= 0 ? l.mid(open + 1, l.lastIndexOf(')') - open - 1) : l.section(' ', 3);
+                    baseParams = open >= 0 ? l.mid(open + 1, l.lastIndexOf(')') - open - 1) : l.section(' ', 3);
+                    baseType = tt[2];
+                    return true;
                 }
             }
-            return QString();
+            return false;
         };
-        baseParams = findBase(m_models);
-        if (baseParams.isEmpty())
-            baseParams = findBase(m_pulledDefs);
-        line = QStringLiteral(".model %1 %2(%3 %4)").arg(am.captured(1), am.captured(3), baseParams, am.captured(4));
+        if (!findBase(m_models))
+            findBase(m_pulledDefs);
+        const QString type = am.captured(3).isEmpty() ? baseType : am.captured(3);
+        line = QStringLiteral(".model %1 %2(%3 %4)").arg(am.captured(1), type, baseParams, am.captured(4));
     }
     // Remove string-valued metadata and LTspice-only rating parameters that can confuse ngspice.
     static const QRegularExpression meta(QStringLiteral("\\s*\\b(mfg|type|pn)\\s*=\\s*(\"[^\"]*\"|\\S+?)(?=[\\s)]|$)"),
@@ -3180,7 +3303,7 @@ void NetlistTranslator::disambiguateModels(QStringList &out)
     }
 }
 
-QStringList NetlistTranslator::floatingNodeShunts(const QStringList &elements)
+QStringList NetlistTranslator::floatingNodeShunts(const QStringList &elements, const QStringList &tiedNodes)
 {
     QHash<QString, QString> parent;
     std::function<QString(const QString &)> find = [&](const QString &n) -> QString {
@@ -3205,7 +3328,15 @@ QStringList NetlistTranslator::floatingNodeShunts(const QStringList &elements)
     };
     auto node = [](const QStringList &t, int i) { return t[i].toLower() == QLatin1String("gnd") ? QStringLiteral("0") : t[i].toLower(); };
     see(QStringLiteral("0"));
-    QList<QPair<QString, QString>> capEdges, icEdges;
+    QList<QPair<QString, QString>> icEdges;
+    struct CapEdge { QString a, b; double c; };
+    QList<CapEdge> capEdges; // values from the parameters g_params points at (set by translate())
+    QList<QStringList> elemNodes; // terminals of each element, for finding dangling nodes
+    for (const QString &n : tiedNodes) {
+        const QString low = n.toLower();
+        see(low);
+        join(low, QStringLiteral("0"));
+    }
     for (const QString &l : elements) {
         const QStringList t = tokenize(l);
         if (t.isEmpty() || l.startsWith('*') || l.startsWith('.'))
@@ -3217,6 +3348,7 @@ QStringList NetlistTranslator::floatingNodeShunts(const QStringList &elements)
                 r << node(t, i);
                 see(r.last());
             }
+            elemNodes << r;
             return r;
         };
         auto chain = [&](const QStringList &ns) {
@@ -3232,7 +3364,7 @@ QStringList NetlistTranslator::floatingNodeShunts(const QStringList &elements)
                 if (l.contains(QRegularExpression(QStringLiteral("\\bic\\s*="), QRegularExpression::CaseInsensitiveOption)))
                     icEdges.append({ns[0], ns[1]});
                 else
-                    capEdges.append({ns[0], ns[1]});
+                    capEdges.append({ns[0], ns[1], t.size() > 3 ? std::abs(numberOr(t[3], 1e-6)) : 1e-6});
             }
             break;
         }
@@ -3266,10 +3398,12 @@ QStringList NetlistTranslator::floatingNodeShunts(const QStringList &elements)
                 join(ns[0], ns[2]);
             break;
         }
-        case 'S':
-            chain(nodes(2));
-            nodes(4);
+        case 'S': {
+            const QStringList ns = nodes(4);
+            if (ns.size() >= 2)
+                join(ns[0], ns[1]);
             break;
+        }
         case 'T': {
             const QStringList ns = nodes(4);
             if (ns.size() == 4) {
@@ -3308,22 +3442,70 @@ QStringList NetlistTranslator::floatingNodeShunts(const QStringList &elements)
     QStringList out;
     QSet<QString> done;
     int idx = 0;
-    // A node reached only through capacitors settles, in LTspice, at the voltage on the far side
-    // of the capacitor (which holds no DC voltage), not at ground: the DC path goes across the
-    // capacitor. Repeat so that chains of capacitors resolve towards a DC-tied node. A capacitor
-    // with ic= already fixes its far side during the operating point; adding a path there changes
-    // what LTspice gives (Electrometer), so such nodes get none.
+    // A node reached only through capacitors ("floating") gets, in LTspice, a DC path made of a
+    // conductance of C*1e-12 S/F across each capacitor touching its group plus 1e-12 S from the
+    // group's last-seen node to ground, so it settles at sum(C*V)/(1F+sum(C)) (measured, also
+    // the node LTspice's "Node x is floating" names). Groups are resolved outwards from DC-tied nodes so
+    // that chains of capacitors work. A capacitor with ic= already fixes its far side during the
+    // operating point; adding a path there changes what LTspice gives (Electrometer).
     for (const auto &[a, b] : icEdges)
         join(a, b);
+    // LTspice first strips dangling nodes (one terminal), repeatedly: a capacitor hanging off the
+    // circuit, or a resistor chain behind one, is not flagged and just follows its far side.
+    QHash<QString, QList<int>> at; // node -> elements touching it
+    QHash<QString, int> degree;
+    for (int e = 0; e < elemNodes.size(); ++e)
+        for (const QString &n : elemNodes[e]) {
+            at[n] << e;
+            ++degree[n];
+        }
+    QSet<QString> dangling;
+    QSet<int> removed;
+    QStringList queue;
+    for (auto it = degree.constBegin(); it != degree.constEnd(); ++it)
+        if (it.value() == 1)
+            queue << it.key();
+    while (!queue.isEmpty()) {
+        const QString n = queue.takeLast();
+        if (n == QLatin1String("0") || tiedNodes.contains(n, Qt::CaseInsensitive) || dangling.contains(n) || degree.value(n) != 1)
+            continue;
+        dangling.insert(n);
+        for (int e : at.value(n)) {
+            if (removed.contains(e))
+                continue;
+            removed.insert(e);
+            for (const QString &m : elemNodes[e])
+                if (m != n && --degree[m] == 1)
+                    queue << m;
+        }
+    }
+    // A dangling group carries no current, so any path will do; 1T keeps the matrix well scaled.
+    auto across = [&](const CapEdge &e, bool flagged) {
+        out << QStringLiteral("R__dcpath%1 %2 %3 %4").arg(++idx).arg(e.a, e.b)
+                   .arg(flagged ? QString::number(1e12 / std::max(e.c, 1e-18), 'g', 6) : QStringLiteral("1T"));
+    };
     for (bool changed = true; changed;) {
         changed = false;
         const QString gnd = find(QStringLiteral("0"));
-        for (const auto &[a, b] : capEdges) {
-            const QString ra = find(a), rb = find(b);
-            if (ra == rb || (ra != gnd && rb != gnd))
-                continue; // same group already, or neither side has a DC path yet
-            out << QStringLiteral("R__dcpath%1 %2 %3 1T").arg(++idx).arg(a, b);
-            join(a, b);
+        QHash<QString, QList<int>> reach; // floating group -> its capacitors to DC-tied nodes
+        for (int i = 0; i < capEdges.size(); ++i) {
+            const QString ra = find(capEdges[i].a), rb = find(capEdges[i].b);
+            if (ra == rb)
+                continue;
+            if ((ra == gnd) != (rb == gnd))
+                reach[ra == gnd ? rb : ra] << i;
+        }
+        for (auto it = reach.constBegin(); it != reach.constEnd(); ++it) {
+            const QString group = it.key();
+            QString last;
+            for (const QString &n : std::as_const(order))
+                if (find(n) == group && !dangling.contains(n))
+                    last = n;
+            for (int i : it.value())
+                across(capEdges[i], !last.isEmpty());
+            if (!last.isEmpty())
+                out << QStringLiteral("R__dcpath%1 %2 0 1e12").arg(++idx).arg(last);
+            join(group, gnd);
             changed = true;
         }
     }

@@ -46,6 +46,13 @@ static bool near(double a, double b, double tol = 1e-9)
 
 static void testUnits()
 {
+    // The unit letter in place of the decimal point (checked in LTspice).
+    CHECK(near(units::parseSpiceNumber("4k7").value_or(0), 4700));
+    CHECK(near(units::parseSpiceNumber("7m999").value_or(0), 7.999e-3));
+    CHECK(near(units::parseSpiceNumber("1u5").value_or(0), 1.5e-6));
+    CHECK(near(units::parseSpiceNumber("2meg2").value_or(0), 2.2e6));
+    CHECK(near(units::parseSpiceNumber("10k").value_or(0), 1e4));
+    CHECK(near(units::parseSpiceNumber("1.5k").value_or(0), 1500));
     CHECK(near(*units::parseSpiceNumber("1k"), 1e3));
     CHECK(near(*units::parseSpiceNumber("4.7u"), 4.7e-6));
     CHECK(near(*units::parseSpiceNumber("2Meg"), 2e6));
@@ -191,6 +198,22 @@ static void testSchematicRoundTrip()
     CHECK(r.text.contains("R1 out in 1k"));
     CHECK(r.text.contains("C1 out 0 100n"));
     CHECK(r.text.contains(".ac dec 100 1 10Meg"));
+    // Pins touching without a wire are P001, P002, ... in the order of the first symbol in the
+    // file that touches them, not by position (checked against LTspice's netlists).
+    {
+        const char *pins =
+            "Version 4\nSHEET 1 880 400\n"
+            "FLAG 16 16 a\nFLAG 16 176 0\nFLAG 216 -284 a\nFLAG 216 -124 0\n"
+            "SYMBOL res 0 0 R0\nSYMATTR InstName R1\nSYMATTR Value 1k\n"
+            "SYMBOL res 0 80 R0\nSYMATTR InstName R2\nSYMATTR Value 1k\n"
+            "SYMBOL res 200 -300 R0\nSYMATTR InstName R3\nSYMATTR Value 1k\n"
+            "SYMBOL res 200 -220 R0\nSYMATTR InstName R4\nSYMATTR Value 1k\n";
+        Schematic sp;
+        CHECK(sp.parse(QString::fromLatin1(pins)));
+        sp.resolveSymbols();
+        const NetlistResult rp = Netlister(sp).build();
+        CHECK(rp.text.contains("R1 a P001") && rp.text.contains("R3 a P002"));
+    }
     // Re-serialize and re-parse.
     Schematic s2;
     s2.parse(s.serialize());
@@ -312,6 +335,41 @@ static void testMacromodelParts()
         CHECK(w.netlist.contains("filesource"));
         CHECK(w.netlist.contains("V1 in ls_v1_71 DC 0"));
         CHECK(w.netlist.contains(QStringLiteral(" %1\n").arg(1.0 / rate, 0, 'g', 12))); // .tran maximum step: one sample
+    }
+    // PWL REPEAT FOREVER (...) ENDREPEAT, with LTspice's "7m999" notation.
+    {
+        NetlistTranslator t7;
+        const TranslationResult p = t7.translate({"* pwl", "V1 a 0 PWL REPEAT FOREVER (0 1 4m 1 7m999 1 8m 0) ENDREPEAT", "R1 a 0 1k", ".tran 30m", ".end"}, o);
+        CHECK(p.netlist.contains("PWL(0 1 0.004 1 0.007999 1 0.008 0) r=0"));
+    }
+    // pwr/pwrs keep LTspice's meaning for negative bases (checked in LTspice).
+    {
+        NetlistTranslator t8;
+        const TranslationResult pw = t8.translate({"* pwr", "V1 n 0 -8", "B1 a 0 V=pwr(V(n),1.1)+pwrs(V(n),2)", "R1 a 0 1", ".op", ".end"}, o);
+        CHECK(pw.netlist.contains("pow(abs(V(n)),(1.1))"));
+        CHECK(pw.netlist.contains("(sgn(V(n))*pow(abs(V(n)),(2)))"));
+    }
+    // A decimal comma in a value is an error, not a silently different part.
+    {
+        NetlistTranslator t9;
+        const TranslationResult dc = t9.translate({"* comma", "V1 a 0 1", "R1 a 0 4,7k", ".op", ".end"}, o);
+        CHECK(!dc.errors.isEmpty() && dc.errors[0].contains("4.7k"));
+    }
+    // A periodic PULSE gets a silent companion whose period starts at the fall, so ngspice
+    // cannot step over a pulse when floor(t/PER) rounds down at a period start.
+    {
+        NetlistTranslator t10;
+        const TranslationResult pu = t10.translate({"* pulse", "V1 c 0 PULSE(0 1 0 1n 1n 2.7u 50u)", "R1 c 0 1k", ".tran 1m", ".end"}, o);
+        CHECK(pu.netlist.contains("Vls_v1_bp ls_v1_72 0 PULSE(0 0 2.701e-06 1e-09 4.7298e-05 1e-09 5e-05)"));
+    }
+    // Floating nodes: C*1e-12 S across each capacitor plus 1e-12 S to ground from the group's
+    // last node, so x settles at sum(C*V)/(1F+sum(C)); a dangling node just follows its far side.
+    {
+        NetlistTranslator t11;
+        const TranslationResult fl = t11.translate({"* fl", "V1 a 0 5", "R1 a 0 1k", "C3 x a 1u", "R9 x y 1k", "C5 y 0 2u",
+                                                    "C6 z a 1u", ".op", ".end"}, o);
+        CHECK(fl.netlist.contains(" x a 1e+18") && fl.netlist.contains(" y 0 5e+17") && fl.netlist.contains(" y 0 1e12"));
+        CHECK(fl.netlist.contains(" z a 1T") && !fl.netlist.contains(" z 0 "));
     }
     // A zener's low-level breakdown (Ibvl/Nbvl) becomes a parallel diode.
     {

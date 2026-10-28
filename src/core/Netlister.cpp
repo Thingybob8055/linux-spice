@@ -263,22 +263,33 @@ Connectivity Netlister::connectivity(const Schematic &sch, QStringList *warnings
                 return a.first.y() != b.first.y() ? a.first.y() < b.first.y() : a.first.x() < b.first.x();
             });
             // Named nets keep their label but still use up a number (as in LTspice).
-            int pinIndex = 0;
+            QSet<int> pinNets;
             for (const auto &o : order) {
                 if (rootName.contains(o.second))
                     continue;
-                if ((mode.isEmpty() || mode == "wire") && !wired.contains(o.second)) {
-                    // Pins touching directly (no wire) get P001, P002, ... like LTspice.
+                if ((mode.isEmpty() || mode == "wire") && !wired.contains(o.second))
+                    pinNets.insert(o.second);
+                else
+                    rootName.insert(o.second, autoName());
+            }
+            // Pins touching directly (no wire) get P001, P002, ... like LTspice, numbered in
+            // the order of the first symbol in the file that touches them (checked in LTspice).
+            int pinIndex = 0;
+            for (int i = 0; i < pinPos.size() && !pinNets.isEmpty(); ++i) {
+                for (const QPoint &p : pinPos[i]) {
+                    const int r = uf.find(pointId.value(Connectivity::key(p)));
+                    if (!pinNets.remove(r))
+                        continue;
                     QString n;
                     do {
                         n = QStringLiteral("P%1").arg(++pinIndex, 3, 10, QChar('0'));
                     } while (used.contains(n.toLower()));
                     used.insert(n.toLower());
-                    rootName.insert(o.second, n);
-                } else {
-                    rootName.insert(o.second, autoName());
+                    rootName.insert(r, n);
                 }
             }
+            for (int r : std::as_const(pinNets))
+                rootName.insert(r, autoName());
         }
     }
     // Wire jumpers join two nets. LTspice numbers both sides first and then
@@ -428,6 +439,13 @@ QStringList Netlister::sheetBody(const Schematic &sch, const Connectivity &conn,
             }
         }
 
+        // Three-pin MOSFET symbols (Prefix MN/MP: nmos, pmos) tie the body to the source, as
+        // LTspice's netlist writes them ("M1 D G S S model"); for a VDMOS model the translator
+        // drops that fourth node again.
+        if ((prefix.compare(QLatin1String("MN"), Qt::CaseInsensitive) == 0 || prefix.compare(QLatin1String("MP"), Qt::CaseInsensitive) == 0)
+            && nodes.size() == 3)
+            nodes << nodes[2];
+
         QStringList tokens;
         tokens << name << nodes;
         if (hier) {
@@ -482,7 +500,11 @@ QStringList Netlister::sheetBody(const Schematic &sch, const Connectivity &conn,
         const bool isSub = prefix.startsWith('X', Qt::CaseInsensitive);
         if (!spiceModel.isEmpty() && !modelIsFile)
             tokens << spiceModel;
-        if (isSub && !value2.isEmpty() && (modelIsFile || value == value2)) {
+        // For a subcircuit, a Value2 that starts with a plain name is the subcircuit to call and
+        // Value is only the displayed part name (LM13700 / HALF13700, LT1001 / LT1001); a Value2
+        // of parameters follows Value (AD7124-8 pga_gain=1 ...). That is how LTspice netlists them.
+        const bool value2IsName = !value2.isEmpty() && !value2.section(QRegularExpression(QStringLiteral("\\s+")), 0, 0).contains('=');
+        if (isSub && !value2.isEmpty() && (modelIsFile || value == value2 || value2IsName)) {
             tokens << value2;
         } else {
             if (!value.isEmpty())

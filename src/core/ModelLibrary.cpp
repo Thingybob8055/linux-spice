@@ -33,7 +33,9 @@ bool ModelLibrary::isEncryptedFile(const QString &path)
     if (!f.open(QIODevice::ReadOnly))
         return false;
     const QByteArray head = f.read(256);
-    return head.contains("<Binary File>");
+    // Two formats: a "<Binary File>" marker, and newer files that announce themselves as
+    // "* LTspice Encrypted File" in a comment header.
+    return head.contains("<Binary File>") || head.contains("LTspice Encrypted File");
 }
 
 bool ModelLibrary::isBinaryLine(const QString &line)
