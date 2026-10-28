@@ -362,6 +362,24 @@ static void testMacromodelParts()
         const TranslationResult pu = t10.translate({"* pulse", "V1 c 0 PULSE(0 1 0 1n 1n 2.7u 50u)", "R1 c 0 1k", ".tran 1m", ".end"}, o);
         CHECK(pu.netlist.contains("Vls_v1_bp ls_v1_72 0 PULSE(0 0 2.701e-06 1e-09 4.7298e-05 1e-09 5e-05)"));
     }
+    // A capacitor with Lser gets Cpar >= C*1e-6, as LTspice logs "Increased Cpar"; PSpice-style
+    // "R name a b MODEL value" keeps its value.
+    {
+        NetlistTranslator t12;
+        const TranslationResult cp = t12.translate({"* cpar", "V1 a 0 1", "C1 a b 56u Rser=11.5m Lser=13.4n", "C2 b 0 1u Lser=0",
+                                                    "R1 b 0 RNOISE 40E3 $ comment", ".model RNOISE RES(T_ABS=-273.15)", ".op", ".end"}, o);
+        CHECK(cp.netlist.contains("CC1_cpar a b 56p"));
+        CHECK(!cp.netlist.contains("CC2_cpar"));
+        CHECK(cp.netlist.contains("R1 b 0 40E3"));
+    }
+    // A switch without hysteresis stays off while its control sits exactly at Vt, as in LTspice.
+    {
+        NetlistTranslator t13;
+        const TranslationResult sw = t13.translate({"* sw", "V1 c 0 0", "V2 a 0 5", "S1 a b c 0 SW", "R1 b 0 10k", ".model sw sw()",
+                                                    "S2 a d c 0 SH", "R2 d 0 1k", ".model sh sw(vt=1 vh=0.5)", ".op", ".end"}, o);
+        CHECK(sw.netlist.contains(QRegularExpression("\\.model sw sw\\(\\s*vt=2n vh=1e-9\\)", QRegularExpression::CaseInsensitiveOption)));
+        CHECK(sw.netlist.contains(QRegularExpression("\\.model sh sw\\(vt=1 vh=0.5\\)", QRegularExpression::CaseInsensitiveOption)));
+    }
     // Floating nodes: C*1e-12 S across each capacitor plus 1e-12 S to ground from the group's
     // last node, so x settles at sum(C*V)/(1F+sum(C)); a dangling node just follows its far side.
     {

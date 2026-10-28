@@ -1514,6 +1514,9 @@ QStringList NetlistTranslator::translatePassive(const QStringList &t)
         q.replace(QRegularExpression(QStringLiteral("\\bx\\b")), QStringLiteral("V(%1,%2)").arg(n1, n2));
         return {QStringLiteral("B%1_q %2 %3 I=ddt(%4)").arg(name, n1, n2, rewriteExpression(q))};
     }
+    // PSpice form "R1 a b RMODEL 10k" (vendor op-amp models): the value follows the model name.
+    if (pos.size() >= 2 && !isValueToken(pos[0]) && isValueToken(pos[1]))
+        pos.removeFirst();
     QString value;
     if (!pos.isEmpty())
         value = pos.takeFirst();
@@ -1574,6 +1577,17 @@ QStringList NetlistTranslator::translatePassive(const QStringList &t)
         rser.clear();
     if (!lser.isEmpty() && numberOr(lser, 1.0) == 0.0)
         lser.clear();
+    // LTspice raises a capacitor's Cpar to at least C*1e-6 when it has an Lser ("Increased Cpar"
+    // in its log); without it the bare series LC can stall the timestep at switching edges.
+    if (k == 'C' && !lser.isEmpty()) {
+        const double c = numberOr(value, qQNaN());
+        if (std::isnan(c)) {
+            if (cpar.isEmpty())
+                cpar = QStringLiteral("{abs(%1)*1e-6}").arg(units::isBraced(value) ? value.mid(1, value.size() - 2) : value);
+        } else if (std::abs(c) * 1e-6 > numberOr(cpar, 0.0)) {
+            cpar = units::formatSpice(std::abs(c) * 1e-6);
+        }
+    }
 
     QString extra;
     static const QSet<QString> allowedR = {QStringLiteral("tc1"), QStringLiteral("tc2"), QStringLiteral("tc"), QStringLiteral("temp"),
@@ -2985,6 +2999,34 @@ QString NetlistTranslator::translateModel(const QString &lineIn)
                     line.insert(line.lastIndexOf(')'), ' ' + add.join(' '));
                 else
                     line += QStringLiteral(" (%1)").arg(add.join(' '));
+            }
+        }
+    }
+    // A switch without hysteresis is on in LTspice only while the control exceeds Vt; ngspice
+    // also turns it on when the control sits exactly at Vt (a PULSE(0 1 ...) gate before it
+    // starts, with the default Vt=0). A 2n band just above Vt keeps it off there and on above.
+    {
+        static const QRegularExpression swm(QStringLiteral("^\\.model\\s+\\S+\\s+(C?SW)\\b"), QRegularExpression::CaseInsensitiveOption);
+        const auto sm = swm.match(line);
+        if (sm.hasMatch()) {
+            const bool csw = sm.captured(1).size() == 3;
+            const QString tk = csw ? QStringLiteral("it") : QStringLiteral("vt"), hk = csw ? QStringLiteral("ih") : QStringLiteral("vh");
+            const QRegularExpression tRe(QStringLiteral("\\s*\\b%1\\s*=\\s*([^\\s)]+)").arg(tk), QRegularExpression::CaseInsensitiveOption);
+            const QRegularExpression hRe(QStringLiteral("\\s*\\b%1\\s*=\\s*([^\\s)]+)").arg(hk), QRegularExpression::CaseInsensitiveOption);
+            const auto hm = hRe.match(line);
+            if (!hm.hasMatch() || numberOr(hm.captured(1), 1.0) == 0.0) {
+                const auto tm = tRe.match(line);
+                QString vt = tm.hasMatch() ? tm.captured(1) : QStringLiteral("0");
+                if (units::isBraced(vt))
+                    vt = vt.mid(1, vt.size() - 2);
+                const double v = numberOr(vt, qQNaN());
+                const QString shifted = std::isnan(v) ? QStringLiteral("{(%1)+2e-9}").arg(vt) : units::formatSpice(v + 2e-9, 12);
+                line.remove(tRe).remove(hRe);
+                const QString add = QStringLiteral("%1=%2 %3=1e-9").arg(tk, shifted, hk);
+                if (line.contains('('))
+                    line.insert(line.lastIndexOf(')') >= 0 ? line.lastIndexOf(')') : line.size(), ' ' + add);
+                else
+                    line += QStringLiteral(" (%1)").arg(add);
             }
         }
     }
