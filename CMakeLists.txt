@@ -22,6 +22,7 @@ set(CORE_SOURCES
     src/core/RawFile.cpp
     src/core/Expression.cpp
     src/core/Fft.cpp
+    src/core/Fourier.cpp
     src/core/PlotSettings.cpp
     src/core/ZipReader.cpp
     src/core/ModelLibrary.cpp
