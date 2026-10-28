@@ -24,6 +24,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QRegularExpression>
+#include <QTemporaryDir>
 
 #include <cmath>
 #include <cstdio>
@@ -81,6 +82,36 @@ static void testPlotSettingsPanes()
         }
     }
     QFile::remove(path);
+}
+
+// An LTspice raw file saved from a start time stores times relative to it, with the start in
+// "Offset:"; the reader restores absolute times.
+static void testRawOffset()
+{
+    QTemporaryDir dir;
+    const QString path = dir.filePath(QStringLiteral("o.raw"));
+    QByteArray hdr = QStringLiteral("Title: t\nDate: x\nPlotname: Transient Analysis\nFlags: real forward\nNo. Variables: 2\n"
+                                    "No. Points: 2\nOffset:    2.9500000000000002e+00\nVariables:\n\t0\ttime\ttime\n\t1\tV(a)\tvoltage\nBinary:\n").toUtf8();
+    QByteArray file;
+    for (char c : hdr) {
+        file.append(c);
+        file.append('\0');
+    }
+    for (double t : {0.0, 0.05}) {
+        const float v = 1.0f;
+        file.append(reinterpret_cast<const char *>(&t), 8);
+        file.append(reinterpret_cast<const char *>(&v), 4);
+    }
+    QFile f(path);
+    CHECK(f.open(QIODevice::WriteOnly) && f.write(file) == file.size());
+    f.close();
+    QString err;
+    const auto plots = rawfile::read(path, &err);
+    CHECK(!plots.isEmpty());
+    if (!plots.isEmpty()) {
+        CHECK(near(plots[0]->runs[0].re[0][0], 2.95));
+        CHECK(near(plots[0]->runs[0].re[0][1], 3.0));
+    }
 }
 
 static void testFra()
@@ -259,6 +290,28 @@ static void testMacromodelParts()
         NetlistTranslator t2;
         const TranslationResult g = t2.translate({"* g", "V1 c 0 1", "G1 o 0 c 0 100m vto=670m dir=1", "R1 o 0 1", ".op", ".end"}, o);
         CHECK(g.netlist.contains("uramp((1)*(V(c,0)-(670m)))*uramp((1)*(V(c,0)-(670m)))"));
+    }
+    // A long .wav input streams through XSPICE's filesource with the step held to one sample.
+    {
+        QTemporaryDir dir;
+        QFile wav(dir.filePath(QStringLiteral("long.wav")));
+        CHECK(wav.open(QIODevice::WriteOnly));
+        const quint32 n = 30000, rate = 44100;
+        auto u32 = [&](quint32 v) { wav.write(reinterpret_cast<const char *>(&v), 4); };
+        auto u16 = [&](quint16 v) { wav.write(reinterpret_cast<const char *>(&v), 2); };
+        wav.write("RIFF"); u32(36 + 2 * n); wav.write("WAVEfmt "); u32(16); u16(1); u16(1); u32(rate); u32(2 * rate); u16(2); u16(16);
+        wav.write("data"); u32(2 * n);
+        for (quint32 k = 0; k < n; ++k)
+            u16(quint16(qint16(1000 * std::sin(k * 0.05))));
+        wav.close();
+        NetlistTranslator t6;
+        NetlistTranslator::Options wo = o;
+        wo.baseDir = dir.path();
+        const TranslationResult w = t6.translate({"* wav", "V1 in 0 wavefile=long.wav", "R1 in 0 1k", ".tran 0.5", ".end"}, wo);
+        CHECK(w.errors.isEmpty());
+        CHECK(w.netlist.contains("filesource"));
+        CHECK(w.netlist.contains("V1 in ls_v1_71 DC 0"));
+        CHECK(w.netlist.contains(QStringLiteral(" %1\n").arg(1.0 / rate, 0, 'g', 12))); // .tran maximum step: one sample
     }
     // A zener's low-level breakdown (Ibvl/Nbvl) becomes a parallel diode.
     {
@@ -462,6 +515,7 @@ int main(int argc, char **argv)
     testGeometry();
     testFra();
     testPlotSettingsPanes();
+    testRawOffset();
     testExpression();
     testSchematicRoundTrip();
     testTranslator();
