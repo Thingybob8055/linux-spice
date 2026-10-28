@@ -414,6 +414,17 @@ static void testMacromodelParts()
         const TranslationResult inc = t15.translate({"* inc", "V1 a 0 1", "X1 a 0 xx", ".include./lib/x.sub", ".op", ".end"}, oi);
         CHECK(inc.errors.isEmpty() && inc.netlist.contains(".subckt xx", Qt::CaseInsensitive));
     }
+    // An ideal diode's default Ron is 1 mOhm; in .ac a behavioral source holds a device current
+    // (not a voltage source's) at its operating-point value, as LTspice does.
+    {
+        NetlistTranslator t16;
+        const TranslationResult ac = t16.translate({"* ac", "V1 a 0 2 AC 1", "R3 a b 100", "D1 b 0 LED", ".model LED D(Vfwd=1.4)",
+                                                    "B1 x 0 I=I(D1)*1k", "B2 y 0 I=I(V1)*1k", "R2 x 0 1", "R4 y 0 1", ".ac lin 1 1k 1k", ".end"}, o);
+        CHECK(ac.netlist.contains("I=999.999999999999*max("));
+        CHECK(ac.netlist.contains(QRegularExpression("B1 x 0 I=V\\(ls_hold_\\S+_y\\)\\*1k")));
+        CHECK(ac.netlist.contains(QRegularExpression("Lls_hold_\\S+ \\S+ \\S+ 1e30")));
+        CHECK(ac.netlist.contains("B2 y 0 I=I(V1)*1k"));
+    }
     // A zener's low-level breakdown (Ibvl/Nbvl) becomes a parallel diode.
     {
         NetlistTranslator t3;

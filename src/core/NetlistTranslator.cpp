@@ -547,8 +547,15 @@ TranslationResult NetlistTranslator::translate(const QStringList &ltLines, const
     out << pulled;
     for (const QString &m : m_models)
         out << translateModel(m);
+    out << m_holdLines;
     if (m_needLocator)
         out << QStringLiteral(".model ls_loc_sw sw(vt=0 vh=0 ron=1 roff=1)");
+    // A floating group hangs on 2^-43 S leaks, so its operating point is ill-conditioned: ngspice's
+    // direct Newton stops within vntol (1uV) of it, and an oscillator whose tank floats then starts
+    // from that error where LTspice stays on the exact equilibrium (a Colpitts tank: 1.68uV vs
+    // LTspice's 3.365uV). Reaching the operating point by gmin stepping lands on it exactly.
+    if (out.join('\n').contains(QStringLiteral(" 0 %1").arg(8796093022208.0, 0, 'g', 13)))
+        out << QStringLiteral(".options noopiter");
     out << m_directives;
     // LTspice's noise plot holds every device's contribution to the output noise.
     if (m_res.analysis == QLatin1String("noise"))
@@ -1205,7 +1212,25 @@ QString NetlistTranslator::rewriteCurrents(const QString &expr) const
         if (!m_senses.contains(dev.toLower()))
             continue;
         const int term = senseTerminal(m.captured(1), dev[0]);
-        out.replace(m.capturedStart(), m.capturedLength(), QStringLiteral("I(%1)").arg(senseSourceName(dev, term)));
+        const QString sense = senseSourceName(dev, term);
+        // In .ac/.noise LTspice linearizes a behavioral source in node voltages and in branch
+        // currents (voltage sources, inductors) only: a resistor's, diode's, capacitor's or other
+        // behavioral source's current stays at its operating-point value (measured: B=I(R1)*k
+        // gives 0 in .ac). A 1e30 H choke passes that DC value and blocks every AC frequency.
+        static const QString frozen = QStringLiteral("RCDQMJZBSW");
+        if ((m_res.analysis == QLatin1String("ac") || m_res.analysis == QLatin1String("noise")) && !m_inSubckt
+            && frozen.contains(dev[0].toUpper())) {
+            const QString hx = QStringLiteral("ls_hold_%1").arg(sense.toLower()), hy = hx + QStringLiteral("_y");
+            if (!m_holds.contains(hx)) {
+                m_holds.insert(hx);
+                m_holdLines << QStringLiteral("Hls_hold_%1 %2 0 %3 1").arg(sense.toLower(), hx, sense)
+                            << QStringLiteral("Lls_hold_%1 %2 %3 1e30").arg(sense.toLower(), hx, hy)
+                            << QStringLiteral("Rls_hold_%1 %2 0 1").arg(sense.toLower(), hy);
+            }
+            out.replace(m.capturedStart(), m.capturedLength(), QStringLiteral("V(%1)").arg(hy));
+            continue;
+        }
+        out.replace(m.capturedStart(), m.capturedLength(), QStringLiteral("I(%1)").arg(sense));
     }
     return out;
 }
@@ -2812,16 +2837,18 @@ QStringList NetlistTranslator::translateIdealDiode(const QStringList &t, const Q
         return units::parseSpiceNumber(v);
     };
     auto lit = [](double x) { return QString::number(x, 'g', 15); };
-    const QString ron = val(QStringLiteral("ron"), QStringLiteral("1"));
+    // LTspice's documented default Ron is 1 mOhm (an LED model with only Vfwd=1.4 sits at 1.40002V at
+    // 24mA there); Rrev defaults to Ron.
+    const QString ron = val(QStringLiteral("ron"), QStringLiteral("1m"));
     const QString roff = val(QStringLiteral("roff"), QStringLiteral("1e12"));
-    const QString rrev = mp.contains(QStringLiteral("rrev")) ? val(QStringLiteral("rrev"), QStringLiteral("1")) : ron;
+    const QString rrev = mp.contains(QStringLiteral("rrev")) ? val(QStringLiteral("rrev"), QStringLiteral("1m")) : ron;
     // Conductance step 1/Ron - 1/Roff, folded when both are numbers.
     auto gstep = [&](const QString &rkey, const QString &rexpr) {
         const auto r = number(mp.contains(rkey) ? rkey : QStringLiteral("ron"));
         const auto ro = mp.contains(QStringLiteral("roff")) ? number(QStringLiteral("roff")) : std::optional<double>(1e12);
         const bool rDefault = !mp.contains(rkey) && !mp.contains(QStringLiteral("ron"));
         if ((r || rDefault) && ro)
-            return lit(1.0 / (rDefault ? 1.0 : *r) - 1.0 / *ro);
+            return lit(1.0 / (rDefault ? 1e-3 : *r) - 1.0 / *ro);
         return QStringLiteral("(1/%1-1/%2)").arg(rexpr, roff);
     };
     const bool unitN = n.trimmed() == QLatin1String("1");
