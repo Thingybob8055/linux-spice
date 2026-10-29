@@ -425,6 +425,18 @@ static void testMacromodelParts()
         CHECK(ac.netlist.contains(QRegularExpression("Lls_hold_\\S+ \\S+ \\S+ 1e30")));
         CHECK(ac.netlist.contains("B2 y 0 I=I(V1)*1k"));
     }
+    // MOSFET levels 1-3: Tox=0 means not given; Rg/Rb/Rds become resistors. In .ac a switch uses
+    // the behavioral form (ngspice's keeps a stale state there).
+    {
+        NetlistTranslator t17;
+        const TranslationResult m = t17.translate({"* mos", "V1 d 0 10", "V2 g 0 6", "M1 d g 0 0 MM",
+                                                   ".model MM NMOS(Level=3 Vto=4 Kp=22u Tox=0 Rg=1.35 Rb=0.01 Rds=1Meg W=1 L=100u)",
+                                                   "V3 c 0 5", "S1 d x c 0 SWM", "R9 x 0 1k", ".model SWM SW(Ron=1 Roff=1Meg Vt=2.5 Vh=0.1)",
+                                                   ".ac dec 1 1 10", ".end"}, o);
+        CHECK(!m.netlist.contains(QRegularExpression("tox\\s*=\\s*0", QRegularExpression::CaseInsensitiveOption)));
+        CHECK(m.netlist.contains(QRegularExpression("RM1_rg g \\S+ 1.35")) && m.netlist.contains("RM1_rds d 0 1Meg"));
+        CHECK(m.netlist.contains(QRegularExpression("\\nBS1 ")));
+    }
     // A zener's low-level breakdown (Ibvl/Nbvl) becomes a parallel diode.
     {
         NetlistTranslator t3;

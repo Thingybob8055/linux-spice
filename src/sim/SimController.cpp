@@ -61,6 +61,9 @@ void SimController::start(const QStringList &ltNetlist, const QString &baseDir, 
     m_baseDir = baseDir;
     m_ltNetlist = ltNetlist;
     m_preLog.clear();
+    for (const QString &l : ltNetlist) // the netlister's notes, such as parts left out
+        if (l.startsWith(QLatin1String("* WARNING: ")))
+            m_preLog += QStringLiteral("Warning: %1\n").arg(l.mid(11));
     m_seedBase = 1;
     static const QRegularExpression seedRe(QStringLiteral("^\\.opt\\w*\\b.*\\bseed\\s*=\\s*(\\d+)"), QRegularExpression::CaseInsensitiveOption);
     for (const QString &l : ltNetlist)
@@ -86,9 +89,23 @@ void SimController::start(const QStringList &ltNetlist, const QString &baseDir, 
         textio::writeFile(m_outputBase + QStringLiteral(".net"), tf);
     }
 
+    // A .dc second sweep ends on its stop value in LTspice (".dc V1 0 1 .3 V2 0 1 .4" gives V2 =
+    // 0, .4, .8, 1), which ngspice's nested sweep doesn't do; as a .step it gets LTspice's rule.
+    QStringList netlist = ltNetlist;
+    for (int i = 0; i < netlist.size(); ++i) {
+        QStringList t = netlist[i].trimmed().split(QRegularExpression(QStringLiteral("\\s+")), Qt::SkipEmptyParts);
+        if (t.isEmpty() || t[0].compare(QLatin1String(".dc"), Qt::CaseInsensitive) != 0)
+            continue;
+        const int first = (t.size() > 1 && t[1].compare(QLatin1String("lin"), Qt::CaseInsensitive) == 0) ? 2 : 1;
+        if (t.size() == first + 8 && t[first].compare(QLatin1String("param"), Qt::CaseInsensitive) != 0) {
+            netlist[i] = t.mid(0, first + 4).join(' ');
+            netlist.insert(i + 1, QStringLiteral(".step %1").arg(t.mid(first + 4).join(' ')));
+        }
+        break;
+    }
     StepPlan plan;
     QString err;
-    if (!plan.parse(ltNetlist, &err)) {
+    if (!plan.parse(netlist, &err)) {
         failNow({err});
         return;
     }
@@ -106,7 +123,7 @@ void SimController::start(const QStringList &ltNetlist, const QString &baseDir, 
     opts.extraOptions = AppSettings::instance().defaultSolverOptions();
 
     for (int r = 0; r < runs; ++r) {
-        const QStringList lines = plan.isEmpty() ? ltNetlist : plan.apply(ltNetlist, r);
+        const QStringList lines = plan.isEmpty() ? netlist : plan.apply(netlist, r);
         NetlistTranslator tr;
         TranslationResult res = tr.translate(lines, opts);
         if (!res.errors.isEmpty()) {
@@ -139,7 +156,7 @@ void SimController::start(const QStringList &ltNetlist, const QString &baseDir, 
     m_netSpecs.clear();
     if (!m_translations.isEmpty() && m_translations[0].analysis == QLatin1String("ac")) {
         for (int r = 0; r < runs; ++r) {
-            const QStringList lines = plan.isEmpty() ? ltNetlist : plan.apply(ltNetlist, r);
+            const QStringList lines = plan.isEmpty() ? netlist : plan.apply(netlist, r);
             QStringList errs;
             const QList<netparams::Spec> specs = netparams::parse(lines, &errs);
             if (r == 0)
@@ -288,6 +305,7 @@ void SimController::onFinished(Job &job, int code)
     // The comparison locators (hidden "ls_loc" switches, see NetlistTranslator::crossingLocators)
     // are dropped before the last resort, in case they are what stalls the run.
     static const QStringList retryOptions = {
+        QStringLiteral("-tmax"),
         QStringLiteral(".options abstol=1e-9 itl4=100"),
         QStringLiteral(".options abstol=1e-6 itl4=100"),
         QStringLiteral("-loc .options abstol=1e-9 itl4=100"),
@@ -308,6 +326,25 @@ void SimController::onFinished(Job &job, int code)
             QString extra = retryOptions[job.retries++];
             QString text = job.originalNetlist;
             QString note = extra;
+            // ngspice's smallest time step is 1e-11 x the maximum step, so a large user maximum
+            // (".tran 0 0.5 0 1": 10ps) stops a switching circuit that LTspice runs; LTspice's
+            // own default, Tstop/1024, keeps it in the femtoseconds.
+            if (extra == QLatin1String("-tmax")) {
+                static const QRegularExpression tranRe(QStringLiteral("^(\\.tran\\s+\\S+\\s+)(\\S+)(\\s+\\S+\\s+)(\\S+)"),
+                                                       QRegularExpression::MultilineOption | QRegularExpression::CaseInsensitiveOption);
+                const auto m = tranRe.match(text);
+                bool ok1 = false, ok2 = false;
+                const double tstop = m.hasMatch() ? m.captured(2).toDouble(&ok1) : 0, tmax = m.hasMatch() ? m.captured(4).toDouble(&ok2) : 0;
+                if (!ok1 || !ok2 || tmax <= tstop / 1024 * 1.0001) {
+                    job.proc = nullptr;
+                    onFinished(job, code); // nothing to change: go on to the next retry
+                    return;
+                }
+                text.replace(m.capturedStart(4), m.capturedLength(4), QString::number(tstop / 1024, 'g', 12));
+                job.originalNetlist = text; // later retries keep the smaller step
+                extra.clear();
+                note = QStringLiteral("the maximum time step reduced to Tstop/1024");
+            }
             if (extra.startsWith(QLatin1String("-loc "))) {
                 extra = extra.mid(5);
                 static const QRegularExpression loc(QStringLiteral("^([BSR]ls_\\S+_loc\\d+ )"), QRegularExpression::MultilineOption);
@@ -315,7 +352,9 @@ void SimController::onFinished(Job &job, int code)
                 note = extra + QStringLiteral(" and no comparison locators");
             }
             const int endIdx = text.lastIndexOf(QLatin1String("\n.end"));
-            if (endIdx >= 0)
+            if (extra.isEmpty())
+                ;
+            else if (endIdx >= 0)
                 text.insert(endIdx, QLatin1Char('\n') + extra);
             else
                 text += QLatin1Char('\n') + extra + QStringLiteral("\n.end\n");

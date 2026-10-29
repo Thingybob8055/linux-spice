@@ -378,7 +378,11 @@ QStringList Netlister::sheetBody(const Schematic &sch, const Connectivity &conn,
         if (names)
             names->append(QString());
         if (!s.def) {
-            m_result.errors << QStringLiteral("Could not find symbol \"%1\"").arg(s.symbolName);
+            // LTspice leaves a part whose symbol it can't find out of the circuit and simulates the
+            // rest; so does LinSpice, but it says so in the netlist and the simulation log.
+            const QString inst = s.attr(QStringLiteral("InstName"));
+            m_result.warnings << QStringLiteral("Symbol \"%1\" not found: %2 is left out of the circuit (as LTspice does)")
+                                     .arg(s.symbolName, inst.isEmpty() ? QStringLiteral("the part") : inst);
             continue;
         }
         if (isJumper(s))
@@ -601,6 +605,9 @@ NetlistResult Netlister::build()
     out << QStringLiteral("* %1").arg(m_sch.filePath.isEmpty() ? QStringLiteral("untitled.asc") : QDir::toNativeSeparators(m_sch.filePath));
     QStringList body = sheetBody(m_sch, m_result.conn, true, &m_result.symbolSpiceName);
     emitSubckts();
+    for (const QString &w : std::as_const(m_result.warnings))
+        if (w.startsWith(QLatin1String("Symbol \"")))
+            out << QStringLiteral("* WARNING: ") + w;
 
     // Element lines first, then subcircuits, then directives in schematic order.
     out << body;

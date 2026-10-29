@@ -2021,6 +2021,30 @@ QStringList NetlistTranslator::crossingLocators(const QStringList &lines)
                                                   QRegularExpression::CaseInsensitiveOption);
             if (jumps.match(lhs).hasMatch() || jumps.match(rhs).hasMatch())
                 continue;
+            // Only a comparison that makes the output jump needs locating. As the condition of a
+            // ternary whose branches depend on circuit quantities (an op-amp macromodel's
+            // "V(x,3)<0 ? 0 : (k*V(x,3))**2") it is usually continuous at the crossing, and the
+            // scaled control node only degrades the numerics (a transformer's 1Meg-anchored
+            // winding moved by 0.3V).
+            {
+                int q = b;
+                while (q < e.size() && (e[q] == ')' || e[q].isSpace()))
+                    ++q;
+                if (q < e.size() && e[q] == '?') {
+                    int depth = 0, colon = -1, end = e.size();
+                    for (int j = q + 1; j < e.size(); ++j) {
+                        if (e[j] == '(')
+                            ++depth;
+                        else if (e[j] == ')' && depth-- == 0) {
+                            end = j;
+                            break;
+                        } else if (e[j] == ':' && depth == 0 && colon < 0)
+                            colon = j;
+                    }
+                    if (colon > 0 && (dyn.match(e.mid(q + 1, colon - q - 1)).hasMatch() || dyn.match(e.mid(colon + 1, end - colon - 1)).hasMatch()))
+                        continue;
+                }
+            }
             const QString ctrl = internalNode(elem, 300 + k), sw = internalNode(elem, 400 + k);
             const QString tag = QStringLiteral("%1_loc%2").arg(elementName(elem)).arg(k);
             out << QStringLiteral("Bls_%1 %2 0 V=1e6*((%3)-(%4))").arg(tag, ctrl, lhs, rhs);
@@ -2322,7 +2346,39 @@ QStringList NetlistTranslator::translateSemiconductor(const QStringList &t)
     }
     QStringList res = out.mid(0, modelIdx + 1);
     res << params;
+    // LTspice's monolithic MOSFETs (levels 1-3) take gate, bulk and drain-source shunt resistances
+    // (Rg, Rb, Rds) that ngspice's ignore; they become resistors around the device.
+    QStringList mosExtra;
+    if (k == 'M' && nodes == 4 && (modelType == QLatin1String("NMOS") || modelType == QLatin1String("PMOS"))) {
+        const QString modelLine = m_modelLines.value(out[modelIdx].toLower());
+        auto param = [&](const char *key) -> QString {
+            const QRegularExpression re(QStringLiteral("\\b%1\\s*=\\s*([^\\s)]+)").arg(QLatin1String(key)), QRegularExpression::CaseInsensitiveOption);
+            const auto m = re.match(normalizeEquals(modelLine));
+            if (!m.hasMatch())
+                return QString();
+            const QString v = m.captured(1);
+            return numberOr(v, 1.0) > 0 ? v : QString(); // 0 means none
+        };
+        const QString name = elementName(t[0]);
+        const QString rg = param("rg"), rb = param("rb"), rds = param("rds");
+        if (!rg.isEmpty()) {
+            const QString gi = internalNode(t[0], 61);
+            mosExtra << QStringLiteral("R%1_rg %2 %3 %4").arg(name, res[2], gi, rg);
+            res[2] = gi;
+        }
+        if (!rb.isEmpty()) {
+            const QString bi = internalNode(t[0], 62);
+            mosExtra << QStringLiteral("R%1_rb %2 %3 %4").arg(name, res[4], bi, rb);
+            res[4] = bi;
+        }
+        if (!rds.isEmpty()) {
+            mosExtra << QStringLiteral("R%1_rds %2 %3 %4").arg(name, res[1], res[3], rds);
+            if (!m_inSubckt)
+                m_res.parallelParts[name.toLower()] << QStringLiteral("r%1_rds").arg(name.toLower());
+        }
+    }
     QStringList lines{res.join(' ')};
+    lines << mosExtra;
     // LTspice's diode has a second, low-level breakdown term Ibvl*exp(-(V+BV)/(Nbvl*Vt)) that sets a
     // zener's voltage at small currents (a 1N750 at 1uA: 1.76V, not 4.26V); ngspice's diode has no
     // such parameters. A second diode in parallel carries just that term: same BV, IBV=Ibvl,
@@ -2709,8 +2765,11 @@ QStringList NetlistTranslator::translateSwitch(const QStringList &t)
     }
     auto num = [&](const QString &key, double def) { return numberOr(mp.value(key), def); };
     const bool vhNegative = num(k == 'S' ? QStringLiteral("vh") : QStringLiteral("ih"), 0) < 0;
+    // ngspice's switch takes its small-signal state from before the operating point converged
+    // (a switch held on by 5V sat open in .ac), so small-signal analyses use the behavioral form.
+    const bool smallSignal = m_res.analysis == QLatin1String("ac") || m_res.analysis == QLatin1String("noise") || m_res.analysis == QLatin1String("tf");
     const bool needed = mp.contains(QStringLiteral("ilimit")) || mp.contains(QStringLiteral("vser")) || mp.contains(QStringLiteral("oneway"))
-        || mp.contains(QStringLiteral("level")) || vhNegative;
+        || mp.contains(QStringLiteral("level")) || vhNegative || smallSignal;
     if (!needed)
         return {};
     auto val = [&](const QString &key, const QString &def) {
@@ -3092,6 +3151,14 @@ QString NetlistTranslator::translateModel(const QString &lineIn)
                     line += QStringLiteral(" (%1)").arg(add.join(' '));
             }
         }
+    }
+    // Tox=0 on a MOSFET means "not given" in LTspice (a power-MOSFET level-3 model with Tox=0 runs
+    // there); ngspice divides by it and the first time step fails.
+    {
+        static const QRegularExpression mos(QStringLiteral("^\\.model\\s+\\S+\\s+[NP]MOS\\b"), QRegularExpression::CaseInsensitiveOption);
+        static const QRegularExpression tox0(QStringLiteral("\\s*\\btox\\s*=\\s*0+\\.?0*(?=[\\s)]|$)"), QRegularExpression::CaseInsensitiveOption);
+        if (mos.match(line).hasMatch())
+            line.remove(tox0);
     }
     // A switch without hysteresis is on in LTspice only while the control exceeds Vt; ngspice
     // also turns it on when the control sits exactly at Vt (a PULSE(0 1 ...) gate before it
@@ -3512,12 +3579,15 @@ QStringList NetlistTranslator::floatingNodeShunts(const QStringList &elements, c
         case 'F':
             nodes(2); // no DC path between the terminals
             break;
-        case 'B':
-            if (l.contains(QRegularExpression(QStringLiteral("^\\S+\\s+\\S+\\s+\\S+\\s+I\\s*="), QRegularExpression::CaseInsensitiveOption)))
-                nodes(2);
-            else
-                chain(nodes(2));
+        case 'B': {
+            // A current source is no DC path, unless its current depends on its own terminal voltage
+            // (a behavioral switch or resistor: "I=g*V(a,b)").
+            const QStringList ns = nodes(2);
+            const bool current = l.contains(QRegularExpression(QStringLiteral("^\\S+\\s+\\S+\\s+\\S+\\s+I\\s*="), QRegularExpression::CaseInsensitiveOption));
+            if (!current || (ns.size() == 2 && l.contains(QStringLiteral("V(%1,%2)").arg(t[1], t[2]), Qt::CaseInsensitive)))
+                chain(ns);
             break;
+        }
         case 'R':
         case 'L':
         case 'V':
@@ -3640,9 +3710,12 @@ QStringList NetlistTranslator::floatingNodeShunts(const QStringList &elements, c
         for (auto it = reach.constBegin(); it != reach.constEnd(); ++it) {
             const QString group = it.key();
             QString last;
+            QString lastInternal;
             for (const QString &n : std::as_const(order))
                 if (find(n) == group && !dangling.contains(n))
-                    last = n;
+                    (n.startsWith(QLatin1String("ls_")) ? lastInternal : last) = n;
+            if (last.isEmpty())
+                last = lastInternal;
             for (int i : it.value())
                 across(capEdges[i], !last.isEmpty());
             if (!last.isEmpty())
@@ -3651,13 +3724,27 @@ QStringList NetlistTranslator::floatingNodeShunts(const QStringList &elements, c
             changed = true;
         }
     }
+    // Groups with no capacitor to the rest of the circuit (a source and a capacitor left on their
+    // own when parts are missing): anchored at their last-seen node, the one LTspice anchors (and
+    // names in "Node x is floating").
     const QString ground = find(QStringLiteral("0"));
+    QHash<QString, QString> lastOf;
+    QStringList groups;
     for (const QString &n : order) {
         const QString r = find(n);
-        if (r == ground || done.contains(r))
+        if (r == ground)
+            continue;
+        if (!lastOf.contains(r))
+            groups << r;
+        // LTspice's nodes only: not those LinSpice adds inside a part (an inductor's Rser node).
+        if ((!dangling.contains(n) && !n.startsWith(QLatin1String("ls_"))) || !lastOf.contains(r))
+            lastOf[r] = n;
+    }
+    for (const QString &r : std::as_const(groups)) {
+        if (done.contains(r))
             continue;
         done.insert(r);
-        out << QStringLiteral("R__dcpath%1 %2 0 1T").arg(++idx).arg(n);
+        out << QStringLiteral("R__dcpath%1 %2 0 1T").arg(++idx).arg(lastOf.value(r));
     }
     return out;
 }
